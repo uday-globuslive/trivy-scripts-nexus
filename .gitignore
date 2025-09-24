@@ -1,2 +1,3 @@
 trivy/
 .env
+**/__pycache__/

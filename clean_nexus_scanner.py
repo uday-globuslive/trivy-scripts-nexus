@@ -115,7 +115,8 @@ class CleanNexusScanner:
         # Debug Trivy version
         try:
             trivy_version_cmd = [self.trivy_path, "--version"]
-            result = subprocess.run(trivy_version_cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(trivy_version_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                  universal_newlines=True, timeout=30)
             self.logger.debug(f"Trivy version check: {result.stdout.strip()}")
             if result.stderr:
                 self.logger.debug(f"Trivy version stderr: {result.stderr.strip()}")
@@ -493,7 +494,8 @@ class CleanNexusScanner:
             self.logger.debug(f"JSON command: {' '.join(json_cmd)}")
             
             # Run JSON scan
-            json_result = subprocess.run(json_cmd, capture_output=True, text=True, timeout=300)
+            json_result = subprocess.run(json_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                       universal_newlines=True, timeout=300)
             
             self.logger.debug(f"JSON scan return code: {json_result.returncode}")
             if json_result.stdout:
@@ -510,7 +512,8 @@ class CleanNexusScanner:
             self.logger.debug(f"HTML command: {' '.join(html_cmd)}")
             
             # Run HTML scan
-            html_result = subprocess.run(html_cmd, capture_output=True, text=True, timeout=300)
+            html_result = subprocess.run(html_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                       universal_newlines=True, timeout=300)
             
             self.logger.debug(f"HTML scan return code: {html_result.returncode}")
             if html_result.stdout:
@@ -786,6 +789,14 @@ class CleanNexusScanner:
                                 if html_content:
                                     self.save_individual_html_report(html_content, component_name, asset_name, scan_timestamp)
                                 
+                                # Immediately delete downloaded file to free up space
+                                try:
+                                    if os.path.exists(local_path):
+                                        os.remove(local_path)
+                                        self.logger.debug(f"Deleted downloaded file after scan: {os.path.basename(local_path)}")
+                                except Exception as e:
+                                    self.logger.debug(f"Could not delete downloaded file {local_path}: {e}")
+                                
                                 if vulnerabilities:
                                     self.logger.info(f"Found {len(vulnerabilities)} vulnerabilities in {asset_name}")
                             else:
@@ -798,6 +809,14 @@ class CleanNexusScanner:
                                 }
                                 self.log_scan_issue('error', asset_info, 'Trivy scan failed', f"Strategy: {strategy['reason']}, Path: {local_path}")
                                 self.stats['scan_errors'] += 1
+                                
+                                # Delete downloaded file even if scan failed to free up space
+                                try:
+                                    if os.path.exists(local_path):
+                                        os.remove(local_path)
+                                        self.logger.debug(f"Deleted downloaded file after failed scan: {os.path.basename(local_path)}")
+                                except Exception as e:
+                                    self.logger.debug(f"Could not delete downloaded file {local_path}: {e}")
                         else:
                             # Log download error
                             asset_info = {
@@ -1105,7 +1124,8 @@ class CleanNexusScanner:
             self.logger.debug(f"Docker JSON command: {' '.join(json_cmd)}")
             
             # Run JSON scan
-            json_result = subprocess.run(json_cmd, capture_output=True, text=True, timeout=300)
+            json_result = subprocess.run(json_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                       universal_newlines=True, timeout=300)
             
             self.logger.debug(f"Docker JSON scan return code: {json_result.returncode}")
             if json_result.stdout:
@@ -1120,7 +1140,8 @@ class CleanNexusScanner:
             self.logger.debug(f"Docker HTML command: {' '.join(html_cmd)}")
             
             # Run HTML scan
-            html_result = subprocess.run(html_cmd, capture_output=True, text=True, timeout=300)
+            html_result = subprocess.run(html_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                       universal_newlines=True, timeout=300)
             
             self.logger.debug(f"Docker HTML scan return code: {html_result.returncode}")
             if html_result.stdout:
@@ -1231,7 +1252,7 @@ class CleanNexusScanner:
             self.logger.error(f"Error during temporary report cleanup: {e}")
     
     def cleanup_downloaded_files(self):
-        """Clean up downloaded files from temp directory while preserving individual reports if configured."""
+        """Clean up any remaining downloaded files from temp directory (fallback cleanup)."""
         try:
             temp_dir = os.path.join(self.output_dir, 'temp')
             if os.path.exists(temp_dir):
@@ -1241,13 +1262,15 @@ class CleanNexusScanner:
                     file_count += len(files)
                 
                 if file_count > 0:
-                    self.logger.info(f"Cleaning up {file_count} downloaded files from temp directory")
+                    self.logger.info(f"Cleaning up {file_count} remaining downloaded files from temp directory")
                     
                     # Remove the entire temp directory and its contents
                     shutil.rmtree(temp_dir)
                     self.logger.debug(f"Removed temp directory: {temp_dir}")
                 else:
-                    self.logger.debug("No downloaded files to clean up")
+                    self.logger.debug("No remaining downloaded files to clean up")
+                    # Remove empty temp directory
+                    os.rmdir(temp_dir)
             else:
                 self.logger.debug("Temp directory does not exist - no files to clean up")
                 
