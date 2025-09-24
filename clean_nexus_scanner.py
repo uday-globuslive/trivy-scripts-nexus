@@ -8,6 +8,8 @@ import os
 import sys
 import json
 import csv
+import glob
+import shutil
 import logging
 import subprocess
 from datetime import datetime
@@ -37,13 +39,88 @@ class CleanNexusScanner:
         self.trivy_path = config['trivy_path']
         self.output_dir = config.get('output_dir', './vulnerability_reports')
         
+        # Debug configuration from .env
+        self.debug_mode = config.get('debug_mode', False)
+        self.debug_log_level = config.get('debug_log_level', 'INFO')
+        self.debug_log_file = config.get('debug_log_file', False)
+        self.debug_trivy_commands = config.get('debug_trivy_commands', False)
+        self.debug_http_requests = config.get('debug_http_requests', False)
+        
+        # Report retention configuration
+        self.retain_individual_reports = config.get('retain_individual_reports', False)
+        
+        # Create separate error and skip tracking
+        self.scan_issues = {
+            'errors': [],
+            'skipped_files': [],
+            'warnings': [],
+            'successful_scans': []  # Track successfully scanned artifacts with details
+        }
+        
         # Setup authentication
         self.auth = HTTPBasicAuth(self.username, self.password)
         
-        # Setup logging
-        self.logger = logging.getLogger(__name__)
+        # Setup logging with debug configuration
+        if self.debug_log_file:
+            # Ensure output directory exists before creating log file
+            os.makedirs(self.output_dir, exist_ok=True)
+            
+            log_filename = f"nexus_scanner_debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            log_filepath = os.path.join(self.output_dir, log_filename)
+            
+            # Create formatter
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            
+            # Set log level based on configuration
+            if self.debug_log_level == 'DEBUG':
+                log_level = logging.DEBUG
+            elif self.debug_log_level == 'INFO':
+                log_level = logging.INFO
+            elif self.debug_log_level == 'WARNING':
+                log_level = logging.WARNING
+            else:
+                log_level = logging.INFO
+                
+            # Create file handler
+            file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(formatter)
+            
+            # Get or create logger
+            self.logger = logging.getLogger('CleanNexusScanner')
+            self.logger.setLevel(log_level)
+            self.logger.addHandler(file_handler)
+            
+            # Also add console handler if in debug mode
+            if self.debug_mode:
+                console_handler = logging.StreamHandler(sys.stdout)
+                console_handler.setLevel(log_level)
+                console_handler.setFormatter(formatter)
+                self.logger.addHandler(console_handler)
+            
+            self.logger.info(f"Debug logging enabled - Log file: {log_filepath}")
+            self.logger.info(f"Debug settings: mode={self.debug_mode}, trivy_commands={self.debug_trivy_commands}, http_requests={self.debug_http_requests}")
+        else:
+            self.logger = logging.getLogger('CleanNexusScanner')
+        
+        self.logger.info("Scanner initialization starting...")
+        self.logger.debug(f"Python version: {sys.version}")
+        self.logger.debug(f"Working directory: {os.getcwd()}")
+        
         self.logger.info(f"Initialized intelligent scanner with Nexus: {self.nexus_url}")
         self.logger.info(f"Using Trivy: {self.trivy_path}")
+        
+        # Debug Trivy version
+        try:
+            trivy_version_cmd = [self.trivy_path, "--version"]
+            result = subprocess.run(trivy_version_cmd, capture_output=True, text=True, timeout=30)
+            self.logger.debug(f"Trivy version check: {result.stdout.strip()}")
+            if result.stderr:
+                self.logger.debug(f"Trivy version stderr: {result.stderr.strip()}")
+        except Exception as e:
+            self.logger.error(f"Failed to get Trivy version: {e}")
         
         # Create output directory
         os.makedirs(self.output_dir, exist_ok=True)
@@ -81,6 +158,179 @@ class CleanNexusScanner:
             'sbom': ['.json', '.xml', '.spdx'],
             'security_report': ['trivy-report', 'scan-report', '.sarif']
         }
+    
+    def log_scan_issue(self, issue_type: str, asset_info: dict, reason: str, details: str = ""):
+        """Log scan issues (errors, skips, warnings) to tracking system."""
+        timestamp = datetime.now().isoformat()
+        issue_record = {
+            'timestamp': timestamp,
+            'type': issue_type,
+            'repository': asset_info.get('repository', 'Unknown'),
+            'component': asset_info.get('component', 'Unknown'),
+            'asset': asset_info.get('asset', 'Unknown'),
+            'artifact_type': asset_info.get('artifact_type', 'Unknown'),
+            'reason': reason,
+            'details': details
+        }
+        
+        if issue_type == 'error':
+            self.scan_issues['errors'].append(issue_record)
+            self.logger.error(f"Scan error - {reason}: {asset_info.get('asset', 'Unknown')}")
+        elif issue_type == 'skip':
+            self.scan_issues['skipped_files'].append(issue_record)
+            self.logger.info(f"Skipping {asset_info.get('asset', 'Unknown')} - {reason}")
+        elif issue_type == 'warning':
+            self.scan_issues['warnings'].append(issue_record)
+            self.logger.warning(f"Scan warning - {reason}: {asset_info.get('asset', 'Unknown')}")
+        
+        # Also add to debug log if enabled
+        if self.debug_mode:
+            self.logger.debug(f"Issue logged: {issue_record}")
+    
+    def log_successful_scan(self, asset_info: dict, scan_details: dict):
+        """Log successfully scanned artifacts with details."""
+        timestamp = datetime.now().isoformat()
+        scan_record = {
+            'timestamp': timestamp,
+            'repository': asset_info.get('repository', 'Unknown'),
+            'component': asset_info.get('component', 'Unknown'),
+            'asset': asset_info.get('asset', 'Unknown'),
+            'artifact_type': asset_info.get('artifact_type', 'Unknown'),
+            'scan_strategy': scan_details.get('scan_strategy', 'Unknown'),
+            'vulnerabilities_found': scan_details.get('vulnerabilities_found', 0),
+            'scan_type': scan_details.get('scan_type', 'Unknown'),
+            'file_size': scan_details.get('file_size', 'Unknown'),
+            'scan_duration': scan_details.get('scan_duration', 'Unknown'),
+            'trivy_command': scan_details.get('trivy_command', 'Unknown')
+        }
+        
+        self.scan_issues['successful_scans'].append(scan_record)
+        
+        if scan_details.get('vulnerabilities_found', 0) > 0:
+            self.logger.info(f"Successfully scanned {asset_info.get('asset', 'Unknown')} - Found {scan_details.get('vulnerabilities_found', 0)} vulnerabilities")
+        else:
+            self.logger.info(f"Successfully scanned {asset_info.get('asset', 'Unknown')} - No vulnerabilities found")
+        
+        # Also add to debug log if enabled
+        if self.debug_mode:
+            self.logger.debug(f"Successful scan logged: {scan_record}")
+    
+    def save_scan_issues_report(self, scan_timestamp: str):
+        """Save scan issues to a separate report file."""
+        try:
+            # Create issues report filename
+            issues_filename = f"scan_issues_report_{scan_timestamp.replace(':', '-')}.json"
+            issues_filepath = os.path.join(self.output_dir, issues_filename)
+            
+            # Prepare comprehensive issues report
+            issues_report = {
+                'scan_metadata': {
+                    'timestamp': scan_timestamp,
+                    'nexus_url': self.nexus_url,
+                    'total_errors': len(self.scan_issues['errors']),
+                    'total_skipped': len(self.scan_issues['skipped_files']),
+                    'total_warnings': len(self.scan_issues['warnings']),
+                    'total_successful_scans': len(self.scan_issues['successful_scans'])
+                },
+                'summary': {
+                    'errors_by_reason': self._group_issues_by_reason(self.scan_issues['errors']),
+                    'skips_by_reason': self._group_issues_by_reason(self.scan_issues['skipped_files']),
+                    'warnings_by_reason': self._group_issues_by_reason(self.scan_issues['warnings']),
+                    'successful_scans_by_type': self._group_successful_scans_by_type(self.scan_issues['successful_scans'])
+                },
+                'detailed_issues': {
+                    'errors': self.scan_issues['errors'],
+                    'skipped_files': self.scan_issues['skipped_files'],
+                    'warnings': self.scan_issues['warnings']
+                },
+                'successful_scans': self.scan_issues['successful_scans']
+            }
+            
+            # Save to JSON file
+            with open(issues_filepath, 'w', encoding='utf-8') as f:
+                json.dump(issues_report, f, indent=2, ensure_ascii=False)
+            
+            # Also create a human-readable CSV for skipped files
+            csv_filename = f"skipped_files_report_{scan_timestamp.replace(':', '-')}.csv"
+            csv_filepath = os.path.join(self.output_dir, csv_filename)
+            
+            if self.scan_issues['skipped_files']:
+                with open(csv_filepath, 'w', newline='', encoding='utf-8') as f:
+                    fieldnames = ['timestamp', 'repository', 'component', 'asset', 'artifact_type', 'reason', 'details']
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    
+                    # Filter out 'type' field from each record
+                    for issue in self.scan_issues['skipped_files']:
+                        row_data = {k: v for k, v in issue.items() if k in fieldnames}
+                        writer.writerow(row_data)
+            
+            # Create a CSV report for successful scans
+            success_csv_filename = f"successful_scans_report_{scan_timestamp.replace(':', '-')}.csv"
+            success_csv_filepath = os.path.join(self.output_dir, success_csv_filename)
+            
+            if self.scan_issues['successful_scans']:
+                with open(success_csv_filepath, 'w', newline='', encoding='utf-8') as f:
+                    fieldnames = ['timestamp', 'repository', 'component', 'asset', 'artifact_type', 
+                                'scan_strategy', 'vulnerabilities_found', 'scan_type', 'file_size', 'scan_duration']
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    
+                    for scan in self.scan_issues['successful_scans']:
+                        row_data = {k: v for k, v in scan.items() if k in fieldnames}
+                        writer.writerow(row_data)
+            
+            self.logger.info(f"Scan issues report saved to: {issues_filepath}")
+            if self.scan_issues['skipped_files']:
+                self.logger.info(f"Skipped files CSV saved to: {csv_filepath}")
+            if self.scan_issues['successful_scans']:
+                self.logger.info(f"Successful scans CSV saved to: {success_csv_filepath}")
+            
+            # Create a CSV report for error/failed scans
+            error_csv_filename = f"error_scans_report_{scan_timestamp.replace(':', '-')}.csv"
+            error_csv_filepath = os.path.join(self.output_dir, error_csv_filename)
+            
+            if self.scan_issues['errors']:
+                with open(error_csv_filepath, 'w', newline='', encoding='utf-8') as f:
+                    fieldnames = ['timestamp', 'repository', 'component', 'asset', 'artifact_type', 
+                                'reason', 'details']
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    
+                    # Filter out 'type' field from each record
+                    for error in self.scan_issues['errors']:
+                        row_data = {k: v for k, v in error.items() if k in fieldnames}
+                        writer.writerow(row_data)
+                        
+                self.logger.info(f"Error scans CSV saved to: {error_csv_filepath}")
+                
+        except Exception as e:
+            self.logger.error(f"Error saving scan issues report: {e}")
+    
+    def _group_issues_by_reason(self, issues_list: list) -> dict:
+        """Group issues by reason for summary statistics."""
+        reason_counts = {}
+        for issue in issues_list:
+            reason = issue.get('reason', 'Unknown')
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        return reason_counts
+    
+    def _group_successful_scans_by_type(self, successful_scans_list: list) -> dict:
+        """Group successful scans by artifact type for summary statistics."""
+        type_stats = {}
+        for scan in successful_scans_list:
+            artifact_type = scan.get('artifact_type', 'Unknown')
+            if artifact_type not in type_stats:
+                type_stats[artifact_type] = {
+                    'count': 0,
+                    'total_vulnerabilities': 0,
+                    'clean_scans': 0
+                }
+            type_stats[artifact_type]['count'] += 1
+            type_stats[artifact_type]['total_vulnerabilities'] += scan.get('vulnerabilities_found', 0)
+            if scan.get('vulnerabilities_found', 0) == 0:
+                type_stats[artifact_type]['clean_scans'] += 1
+        return type_stats
     
     def test_connection(self) -> bool:
         """Test connection to Nexus server."""
@@ -165,27 +415,55 @@ class CleanNexusScanner:
     def download_asset(self, asset_url: str, local_path: str) -> bool:
         """Download an asset from Nexus."""
         try:
+            self.logger.debug(f"=== Starting asset download ===")
+            self.logger.debug(f"Asset URL: {asset_url}")
+            self.logger.debug(f"Local path: {local_path}")
+            
             response = requests.get(asset_url, auth=self.auth, stream=True, timeout=60)
+            self.logger.debug(f"HTTP status code: {response.status_code}")
+            self.logger.debug(f"Content-Type: {response.headers.get('Content-Type', 'Unknown')}")
+            self.logger.debug(f"Content-Length: {response.headers.get('Content-Length', 'Unknown')}")
+            
             response.raise_for_status()
             
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
             
+            downloaded_size = 0
             with open(local_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
+                    downloaded_size += len(chunk)
             
+            self.logger.debug(f"Downloaded {downloaded_size} bytes")
+            self.logger.debug(f"File exists after download: {os.path.exists(local_path)}")
+            if os.path.exists(local_path):
+                actual_size = os.path.getsize(local_path)
+                self.logger.debug(f"Actual file size: {actual_size} bytes")
+            
+            self.logger.debug(f"=== Asset download completed ===")
             return True
             
         except Exception as e:
             self.logger.error(f"Error downloading {asset_url}: {e}")
+            self.logger.debug(f"Download exception details: ", exc_info=True)
             return False
     
     def scan_with_trivy(self, file_path: str, scan_type: str = "fs") -> Optional[tuple]:
         """Scan a file or directory with Trivy. Returns (json_results, html_output)."""
         try:
+            self.logger.debug(f"=== Starting Trivy scan ===")
+            self.logger.debug(f"File path: {file_path}")
+            self.logger.debug(f"Scan type: {scan_type}")
+            self.logger.debug(f"File exists: {os.path.exists(file_path)}")
+            if os.path.exists(file_path):
+                self.logger.debug(f"File size: {os.path.getsize(file_path)} bytes")
+            
             # Create output files for Trivy results
             json_output_file = f"{file_path}.trivy.json"
             html_output_file = f"{file_path}.trivy.html"
+            
+            self.logger.debug(f"JSON output: {json_output_file}")
+            self.logger.debug(f"HTML output: {html_output_file}")
             
             # JSON scan for programmatic processing
             json_cmd = [
@@ -193,41 +471,88 @@ class CleanNexusScanner:
                 scan_type,
                 "--format", "json",
                 "--output", json_output_file,
-                "--quiet",
                 file_path
             ]
             
             # HTML scan using Trivy's built-in template
+            html_template_path = os.path.join(os.path.dirname(self.trivy_path), 'contrib', 'html.tpl')
             html_cmd = [
                 self.trivy_path,
                 scan_type,
                 "--format", "template",
-                "--template", "@contrib/html.tpl",
+                "--template", f"@{html_template_path}",
                 "--output", html_output_file,
-                "--quiet",
                 file_path
             ]
             
+            # Add --quiet flag only if not in debug mode
+            if not self.debug_mode:
+                json_cmd.insert(-1, "--quiet")
+                html_cmd.insert(-1, "--quiet")
+            
+            self.logger.debug(f"JSON command: {' '.join(json_cmd)}")
+            
             # Run JSON scan
             json_result = subprocess.run(json_cmd, capture_output=True, text=True, timeout=300)
+            
+            self.logger.debug(f"JSON scan return code: {json_result.returncode}")
+            if json_result.stdout:
+                self.logger.debug(f"JSON scan stdout: {json_result.stdout}")
+            if json_result.stderr:
+                self.logger.debug(f"JSON scan stderr: {json_result.stderr}")
+                
+            if json_result.returncode != 0:
+                self.logger.error(f"Trivy JSON scan failed for {file_path}")
+                self.logger.error(f"Return code: {json_result.returncode}")
+                self.logger.error(f"STDERR: {json_result.stderr}")
+                return None
+            
+            self.logger.debug(f"HTML command: {' '.join(html_cmd)}")
+            
             # Run HTML scan
             html_result = subprocess.run(html_cmd, capture_output=True, text=True, timeout=300)
+            
+            self.logger.debug(f"HTML scan return code: {html_result.returncode}")
+            if html_result.stdout:
+                self.logger.debug(f"HTML scan stdout: {html_result.stdout}")
+            if html_result.stderr:
+                self.logger.debug(f"HTML scan stderr: {html_result.stderr}")
             
             json_data = None
             html_content = None
             
             # Read JSON results
             if os.path.exists(json_output_file):
-                with open(json_output_file, 'r', encoding='utf-8') as f:
-                    json_data = json.load(f)
-                os.remove(json_output_file)
+                try:
+                    with open(json_output_file, 'r', encoding='utf-8') as f:
+                        json_content = f.read()
+                        self.logger.debug(f"JSON file size: {len(json_content)} characters")
+                        if json_content.strip():
+                            json_data = json.loads(json_content)
+                            self.logger.debug(f"JSON parsed successfully, type: {type(json_data)}")
+                        else:
+                            self.logger.debug("JSON file is empty")
+                    os.remove(json_output_file)
+                    self.logger.debug("JSON output file cleaned up")
+                except Exception as e:
+                    self.logger.error(f"Error parsing JSON results: {e}")
+            else:
+                self.logger.warning(f"JSON output file not found: {json_output_file}")
             
             # Read HTML results
             if os.path.exists(html_output_file):
-                with open(html_output_file, 'r', encoding='utf-8') as f:
-                    html_content = f.read()
-                os.remove(html_output_file)
+                try:
+                    with open(html_output_file, 'r', encoding='utf-8') as f:
+                        html_content = f.read()
+                        self.logger.debug(f"HTML file size: {len(html_content)} characters")
+                    os.remove(html_output_file)
+                    self.logger.debug("HTML output file cleaned up")
+                except Exception as e:
+                    self.logger.error(f"Error reading HTML results: {e}")
+            else:
+                self.logger.warning(f"HTML output file not found: {html_output_file}")
                 
+            self.logger.debug(f"=== Trivy scan completed ===")
             return (json_data, html_content)
                 
         except subprocess.TimeoutExpired:
@@ -235,6 +560,7 @@ class CleanNexusScanner:
             return None
         except Exception as e:
             self.logger.error(f"Error scanning {file_path} with Trivy: {e}")
+            self.logger.debug(f"Exception details: ", exc_info=True)
             return None
     
     def extract_vulnerabilities(self, trivy_results: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -381,11 +707,20 @@ class CleanNexusScanner:
                         # Detect artifact type and determine scanning strategy
                         artifact_type = self.detect_artifact_type(asset_name, repo_format)
                         self.statistics['artifact_types'][artifact_type] += 1
+                        self.logger.debug(f"Detected artifact type: {artifact_type}")
                         
                         strategy = self.determine_scan_strategy(artifact_type, asset_name, repo_format)
+                        self.logger.debug(f"Scan strategy: {strategy}")
                         
                         if strategy['skip_scan']:
-                            self.logger.info(f"Skipping {asset_name} - {strategy['reason']}")
+                            # Log skip with detailed asset information
+                            asset_info = {
+                                'repository': repo_name,
+                                'component': component_name,
+                                'asset': asset_name,
+                                'artifact_type': artifact_type
+                            }
+                            self.log_scan_issue('skip', asset_info, strategy['reason'], f"Download URL: {download_url}")
                             continue
                         
                         self.logger.info(f"Scanning asset: {asset_name} (Type: {artifact_type})")
@@ -396,15 +731,41 @@ class CleanNexusScanner:
                         safe_filename = asset_name.replace('/', '_').replace('\\', '_')
                         local_path = os.path.join(self.output_dir, 'temp', safe_filename)
                         
+                        self.logger.debug(f"Download URL: {download_url}")
+                        self.logger.debug(f"Local path: {local_path}")
+                        
                         # Download and scan
                         if self.download_asset(download_url, local_path):
+                            self.logger.debug(f"Asset downloaded successfully")
+                            
                             # Use intelligent scanning strategy
+                            scan_start_time = datetime.now()
                             scan_results = self.scan_with_strategy(local_path, strategy, artifact_type)
+                            scan_end_time = datetime.now()
+                            scan_duration = str(scan_end_time - scan_start_time)
                             
                             if scan_results and scan_results[0]:  # Check JSON results
                                 json_data, html_content = scan_results
                                 vulnerabilities = self.extract_vulnerabilities(json_data)
                                 self.stats['vulnerabilities_found'] += len(vulnerabilities)
+                                
+                                # Log successful scan with details
+                                file_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+                                asset_info = {
+                                    'repository': repo_name,
+                                    'component': component_name,
+                                    'asset': asset_name,
+                                    'artifact_type': artifact_type
+                                }
+                                scan_details = {
+                                    'scan_strategy': strategy['reason'],
+                                    'vulnerabilities_found': len(vulnerabilities),
+                                    'scan_type': strategy['scan_type'],
+                                    'file_size': f"{file_size:,} bytes",
+                                    'scan_duration': scan_duration,
+                                    'trivy_command': f"trivy {strategy['scan_type']}"
+                                }
+                                self.log_successful_scan(asset_info, scan_details)
                                 
                                 # Add metadata to each vulnerability
                                 for vuln in vulnerabilities:
@@ -421,14 +782,31 @@ class CleanNexusScanner:
                                 
                                 all_vulnerabilities.extend(vulnerabilities)
                                 
-                                # Save individual HTML report if vulnerabilities found
-                                if vulnerabilities and html_content:
+                                # Save individual HTML report for all successful scans
+                                if html_content:
                                     self.save_individual_html_report(html_content, component_name, asset_name, scan_timestamp)
                                 
                                 if vulnerabilities:
                                     self.logger.info(f"Found {len(vulnerabilities)} vulnerabilities in {asset_name}")
                             else:
+                                # Log scan error with detailed information
+                                asset_info = {
+                                    'repository': repo_name,
+                                    'component': component_name,
+                                    'asset': asset_name,
+                                    'artifact_type': artifact_type
+                                }
+                                self.log_scan_issue('error', asset_info, 'Trivy scan failed', f"Strategy: {strategy['reason']}, Path: {local_path}")
                                 self.stats['scan_errors'] += 1
+                        else:
+                            # Log download error
+                            asset_info = {
+                                'repository': repo_name,
+                                'component': component_name,
+                                'asset': asset_name,
+                                'artifact_type': artifact_type
+                            }
+                            self.log_scan_issue('error', asset_info, 'Asset download failed', f"URL: {download_url}")
                             
                             # Clean up downloaded file
                             try:
@@ -439,7 +817,19 @@ class CleanNexusScanner:
         # Save results
         self.save_results(all_vulnerabilities, scan_timestamp)
         self.generate_combined_report(all_vulnerabilities, scan_timestamp)
+        self.save_scan_issues_report(scan_timestamp)  # Save separate issues report
+        
+        # Clean up temporary individual reports if retention is disabled
+        if not self.retain_individual_reports:
+            self.cleanup_temporary_reports()
+        
+        # Always clean up downloaded temp files (but preserve individual reports if configured)
+        self.cleanup_downloaded_files()
+            
         self.print_summary()
+        
+        # Move all reports to timestamped folder
+        self.move_reports_to_timestamped_folder(scan_timestamp)
     
     def save_results(self, vulnerabilities: List[Dict[str, Any]], timestamp: str):
         """Save scan results to files."""
@@ -469,18 +859,70 @@ class CleanNexusScanner:
         """Intelligently detect artifact type based on file extension and repository format."""
         asset_lower = asset_name.lower()
         
-        # Check each artifact type pattern
-        for artifact_type, patterns in self.artifact_patterns.items():
-            if any(asset_lower.endswith(pattern) or pattern in asset_lower for pattern in patterns):
-                return artifact_type
+        # Repository format-based detection for Docker repositories
+        if repo_format == 'docker':
+            return 'container_image'
         
-        # Repository format-based detection
+        # Hash/checksum files should be detected first
+        if any(asset_lower.endswith(ext) for ext in ['.md5', '.sha1', '.sha256', '.sha512']):
+            return 'script'  # These are treated as script files for consistency
+        
+        # Specific file extension patterns (in priority order)
+        # Java artifacts
+        if any(asset_lower.endswith(ext) for ext in ['.jar', '.war', '.ear']):
+            return 'java_jar'
+        elif any(asset_lower.endswith(ext) for ext in ['.java', '.class']):
+            return 'java_source'
+        elif 'pom.xml' in asset_lower or asset_lower.endswith('.pom'):
+            return 'maven_pom'
+        
+        # Python packages (check before generic archives)
+        if any(asset_lower.endswith(ext) for ext in ['.whl', '.egg']) or (asset_lower.endswith('.tar.gz') and 'python' in asset_lower):
+            return 'python_package'
+        
+        # NuGet packages
+        if any(asset_lower.endswith(ext) for ext in ['.nupkg', '.nuspec']):
+            return 'nuget_package'
+        
+        # Node packages
+        if 'package.json' in asset_lower or asset_lower.endswith('.npm') or (asset_lower.endswith('.tgz') and 'node' in asset_lower):
+            return 'node_package'
+        
+        # Container images (only for actual Docker layers/manifests, not in Maven repos)
+        if repo_format != 'docker' and any(filename in asset_lower for filename in ['manifest.json', 'config.json']):
+            return 'docker_manifest'
+        
+        # Archives (generic)
+        if any(asset_lower.endswith(ext) for ext in ['.zip', '.7z', '.rar']):
+            return 'archive'
+        elif any(asset_lower.endswith(ext) for ext in ['.tar', '.tar.gz', '.tgz']) and repo_format != 'docker':
+            return 'archive'  # Treat .tar.gz as archives unless in Docker repo
+        
+        # Binary executables
+        if any(asset_lower.endswith(ext) for ext in ['.exe', '.dll', '.so', '.dylib']):
+            return 'binary_executable'
+        
+        # Scripts
+        if any(asset_lower.endswith(ext) for ext in ['.sh', '.bat', '.ps1', '.py', '.js']):
+            return 'script'
+        
+        # Configuration files
+        if any(asset_lower.endswith(ext) for ext in ['.xml', '.json', '.yaml', '.yml', '.properties', '.conf']):
+            return 'configuration'
+        
+        # SBOM files
+        if any(filename in asset_lower for filename in ['.spdx']) or (asset_lower.endswith('.json') and 'sbom' in asset_lower):
+            return 'sbom'
+        
+        # Security reports
+        if any(filename in asset_lower for filename in ['trivy-report', 'scan-report', '.sarif']):
+            return 'security_report'
+        
+        # Repository format-based fallback
         if repo_format == 'maven2':
             return 'maven_artifact'
         elif repo_format == 'nuget':
             return 'nuget_package'
-        elif repo_format == 'docker':
-            return 'container_image'
         elif repo_format == 'raw':
             return 'raw_file'
         
@@ -507,9 +949,9 @@ class CleanNexusScanner:
         # Container images
         elif artifact_type == 'container_image' or repo_format == 'docker':
             strategy.update({
-                'scan_type': 'fs',  # For downloaded tar files
-                'extract_before_scan': True,
-                'reason': 'Container image - extract and scan layers'
+                'scan_type': 'image',  # Use Trivy's image scanning for container images
+                'extract_before_scan': False,  # Trivy handles container layers automatically
+                'reason': 'Container image - scan with Trivy image scanner'
             })
         
         # Python packages
@@ -609,7 +1051,14 @@ class CleanNexusScanner:
                     # This will be handled by the normal asset scanning logic
             
         except Exception as e:
-            self.logger.error(f"Error processing Docker component {component_name}: {e}")
+            # Log Docker component processing error
+            asset_info = {
+                'repository': repo_name,
+                'component': component_name,
+                'asset': f"docker_image_{component_version}",
+                'artifact_type': 'container_image'
+            }
+            self.log_scan_issue('error', asset_info, 'Docker component processing failed', f"Error: {str(e)}")
             self.stats['scan_errors'] += 1
         
         return vulnerabilities
@@ -617,62 +1066,104 @@ class CleanNexusScanner:
     def scan_docker_image_direct(self, image_reference: str, component_name: str, component_version: str) -> List[Dict[str, Any]]:
         """Scan Docker image directly using Trivy's image scanning capability."""
         try:
+            self.logger.debug(f"=== Starting Docker image scan ===")
+            self.logger.debug(f"Image reference: {image_reference}")
+            self.logger.debug(f"Component: {component_name}:{component_version}")
+            
             # Create output files
             safe_name = image_reference.replace('/', '_').replace(':', '_')
             json_output_file = os.path.join(self.output_dir, 'temp', f"{safe_name}_docker.json")
             html_output_file = os.path.join(self.output_dir, 'temp', f"{safe_name}_docker.html")
             
             os.makedirs(os.path.dirname(json_output_file), exist_ok=True)
+            self.logger.debug(f"Docker JSON output: {json_output_file}")
+            self.logger.debug(f"Docker HTML output: {html_output_file}")
             
             # JSON scan command
             json_cmd = [
                 self.trivy_path, "image",
                 "--format", "json",
                 "--output", json_output_file,
-                "--quiet",
                 image_reference
             ]
             
             # HTML scan command  
+            html_template_path = os.path.join(os.path.dirname(self.trivy_path), 'contrib', 'html.tpl')
             html_cmd = [
                 self.trivy_path, "image",
                 "--format", "template", 
-                "--template", "@contrib/html.tpl",
+                "--template", f"@{html_template_path}",
                 "--output", html_output_file,
-                "--quiet",
                 image_reference
             ]
             
+            # Add --quiet flag only if not in debug mode
+            if not self.debug_mode:
+                json_cmd.insert(-1, "--quiet")
+                html_cmd.insert(-1, "--quiet")
+            
+            self.logger.debug(f"Docker JSON command: {' '.join(json_cmd)}")
+            
             # Run JSON scan
             json_result = subprocess.run(json_cmd, capture_output=True, text=True, timeout=300)
+            
+            self.logger.debug(f"Docker JSON scan return code: {json_result.returncode}")
+            if json_result.stdout:
+                self.logger.debug(f"Docker JSON scan stdout: {json_result.stdout}")
+            if json_result.stderr:
+                self.logger.debug(f"Docker JSON scan stderr: {json_result.stderr}")
+                
             if json_result.returncode != 0:
                 self.logger.debug(f"Docker image scan failed for {image_reference}: {json_result.stderr}")
                 return []
             
+            self.logger.debug(f"Docker HTML command: {' '.join(html_cmd)}")
+            
             # Run HTML scan
-            subprocess.run(html_cmd, capture_output=True, text=True, timeout=300)
+            html_result = subprocess.run(html_cmd, capture_output=True, text=True, timeout=300)
+            
+            self.logger.debug(f"Docker HTML scan return code: {html_result.returncode}")
+            if html_result.stdout:
+                self.logger.debug(f"Docker HTML scan stdout: {html_result.stdout}")
+            if html_result.stderr:
+                self.logger.debug(f"Docker HTML scan stderr: {html_result.stderr}")
             
             # Parse JSON results
             vulnerabilities = []
             if os.path.exists(json_output_file):
-                with open(json_output_file, 'r', encoding='utf-8') as f:
-                    json_data = json.load(f)
-                    vulnerabilities = self.extract_vulnerabilities(json_data)
+                try:
+                    with open(json_output_file, 'r', encoding='utf-8') as f:
+                        json_content = f.read()
+                        self.logger.debug(f"Docker JSON file size: {len(json_content)} characters")
+                        if json_content.strip():
+                            json_data = json.loads(json_content)
+                            vulnerabilities = self.extract_vulnerabilities(json_data)
+                            self.logger.debug(f"Docker scan found {len(vulnerabilities)} vulnerabilities")
+                        else:
+                            self.logger.debug("Docker JSON file is empty")
+                except Exception as e:
+                    self.logger.error(f"Error parsing Docker JSON results: {e}")
                 
                 # Save individual HTML report if vulnerabilities found and HTML exists
                 if vulnerabilities and os.path.exists(html_output_file):
-                    with open(html_output_file, 'r', encoding='utf-8') as f:
-                        html_content = f.read()
-                    self.save_individual_html_report(html_content, component_name, f"docker_image_{component_version}", "docker_scan")
+                    try:
+                        with open(html_output_file, 'r', encoding='utf-8') as f:
+                            html_content = f.read()
+                        self.save_individual_html_report(html_content, component_name, f"docker_image_{component_version}", "docker_scan")
+                        self.logger.debug("Docker HTML report saved")
+                    except Exception as e:
+                        self.logger.error(f"Error saving Docker HTML report: {e}")
                 
                 # Clean up temp files
                 for temp_file in [json_output_file, html_output_file]:
                     if os.path.exists(temp_file):
                         try:
                             os.remove(temp_file)
-                        except:
-                            pass
+                            self.logger.debug(f"Cleaned up temp file: {temp_file}")
+                        except Exception as e:
+                            self.logger.debug(f"Could not clean up temp file {temp_file}: {e}")
                             
+            self.logger.debug(f"=== Docker image scan completed ===")
             return vulnerabilities
             
         except subprocess.TimeoutExpired:
@@ -680,6 +1171,7 @@ class CleanNexusScanner:
             return []
         except Exception as e:
             self.logger.debug(f"Error in direct Docker scan for {image_reference}: {e}")
+            self.logger.debug(f"Docker scan exception details: ", exc_info=True)
             return []
     
     def save_individual_html_report(self, html_content: str, component_name: str, asset_name: str, timestamp: str):
@@ -689,18 +1181,78 @@ class CleanNexusScanner:
             safe_component = component_name.replace('/', '_').replace(':', '_')
             safe_asset = asset_name.replace('/', '_').replace('\\', '_')
             
-            html_file = os.path.join(
-                self.output_dir, 
-                f'individual_report_{safe_component}_{safe_asset}_{timestamp.replace(":", "-")}.html'
-            )
-            
-            with open(html_file, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-            
-            self.logger.info(f"Individual HTML report saved: {html_file}")
+            if self.retain_individual_reports:
+                # Create individual_files_reports directory if it doesn't exist
+                individual_reports_dir = os.path.join(self.output_dir, 'individual_files_reports')
+                os.makedirs(individual_reports_dir, exist_ok=True)
+                
+                # Use structured filename: component_name_asset_name_report.html
+                filename = f"{safe_component}_{safe_asset}_report.html"
+                html_file = os.path.join(individual_reports_dir, filename)
+                
+                with open(html_file, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                
+                self.logger.info(f"Individual HTML report retained: {html_file}")
+                
+            else:
+                # Original behavior - save to main directory temporarily (will be cleaned up)
+                html_file = os.path.join(
+                    self.output_dir, 
+                    f'individual_report_{safe_component}_{safe_asset}_{timestamp.replace(":", "-")}.html'
+                )
+                
+                with open(html_file, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                
+                self.logger.debug(f"Temporary individual HTML report saved: {html_file}")
             
         except Exception as e:
             self.logger.error(f"Error saving individual HTML report: {e}")
+    
+    def cleanup_temporary_reports(self):
+        """Clean up temporary individual HTML reports when retention is disabled."""
+        try:
+            report_pattern = os.path.join(self.output_dir, 'individual_report_*.html')
+            temp_reports = glob.glob(report_pattern)
+            
+            if temp_reports:
+                self.logger.info(f"Cleaning up {len(temp_reports)} temporary individual reports")
+                for report_file in temp_reports:
+                    try:
+                        os.remove(report_file)
+                        self.logger.debug(f"Removed temporary report: {os.path.basename(report_file)}")
+                    except Exception as e:
+                        self.logger.debug(f"Could not remove {report_file}: {e}")
+            else:
+                self.logger.debug("No temporary individual reports to clean up")
+                
+        except Exception as e:
+            self.logger.error(f"Error during temporary report cleanup: {e}")
+    
+    def cleanup_downloaded_files(self):
+        """Clean up downloaded files from temp directory while preserving individual reports if configured."""
+        try:
+            temp_dir = os.path.join(self.output_dir, 'temp')
+            if os.path.exists(temp_dir):
+                # Count files before cleanup
+                file_count = 0
+                for root, dirs, files in os.walk(temp_dir):
+                    file_count += len(files)
+                
+                if file_count > 0:
+                    self.logger.info(f"Cleaning up {file_count} downloaded files from temp directory")
+                    
+                    # Remove the entire temp directory and its contents
+                    shutil.rmtree(temp_dir)
+                    self.logger.debug(f"Removed temp directory: {temp_dir}")
+                else:
+                    self.logger.debug("No downloaded files to clean up")
+            else:
+                self.logger.debug("Temp directory does not exist - no files to clean up")
+                
+        except Exception as e:
+            self.logger.error(f"Error during downloaded files cleanup: {e}")
     
     def generate_html_reports(self, vulnerabilities: List[Dict[str, Any]], timestamp: str):
         """Generate HTML reports for vulnerabilities."""
@@ -1226,6 +1778,22 @@ class CleanNexusScanner:
         self.logger.info(f"Vulnerabilities found: {self.stats['vulnerabilities_found']}")
         self.logger.info(f"Scan errors: {self.stats['scan_errors']}")
         
+        # Issue summary
+        total_issues = len(self.scan_issues['errors']) + len(self.scan_issues['skipped_files']) + len(self.scan_issues['warnings'])
+        total_successful = len(self.scan_issues['successful_scans'])
+        self.logger.info(f"Total issues logged: {total_issues}")
+        self.logger.info(f"  - Errors: {len(self.scan_issues['errors'])}")
+        self.logger.info(f"  - Skipped files: {len(self.scan_issues['skipped_files'])}")
+        self.logger.info(f"  - Warnings: {len(self.scan_issues['warnings'])}")
+        self.logger.info(f"Successful scans: {total_successful}")
+        
+        # Successful scan breakdown
+        if total_successful > 0:
+            clean_scans = sum(1 for scan in self.scan_issues['successful_scans'] if scan.get('vulnerabilities_found', 0) == 0)
+            vuln_scans = total_successful - clean_scans
+            self.logger.info(f"  - Clean scans (0 vulnerabilities): {clean_scans}")
+            self.logger.info(f"  - Scans with vulnerabilities: {vuln_scans}")
+        
         # Repository types detected
         self.logger.info("")
         self.logger.info("Repository Types Detected:")
@@ -1240,7 +1808,79 @@ class CleanNexusScanner:
             if count > 0:
                 self.logger.info(f"  {artifact_type}: {count}")
         
+        # Report retention status
+        self.logger.info("")
+        self.logger.info("Report Configuration:")
+        if self.retain_individual_reports:
+            self.logger.info("  Individual reports: RETAINED in 'individual_files_reports' folder")
+        else:
+            self.logger.info("  Individual reports: TEMPORARY (cleaned up after scan)")
+        
         self.logger.info("=" * 50)
+    
+    def move_reports_to_timestamped_folder(self, scan_timestamp: str):
+        """Create a timestamped folder and move all generated reports into it."""
+        try:
+            # Create timestamped folder name
+            folder_timestamp = scan_timestamp.replace(":", "-").replace(".", "-")
+            timestamped_folder = os.path.join(self.output_dir, f"scan_reports_{folder_timestamp}")
+            
+            # Create the timestamped folder
+            os.makedirs(timestamped_folder, exist_ok=True)
+            self.logger.info(f"Created timestamped report folder: {timestamped_folder}")
+            
+            # Collect all report files that match the timestamp
+            timestamp_pattern = scan_timestamp.replace(":", "-")
+            report_files = []
+            subfolders_to_move = []
+            
+            # Find all files in output directory that match this timestamp
+            for item in os.listdir(self.output_dir):
+                item_path = os.path.join(self.output_dir, item)
+                
+                if os.path.isfile(item_path):
+                    # Check if file matches our timestamp pattern
+                    if timestamp_pattern in item:
+                        report_files.append(item)
+                elif os.path.isdir(item_path) and item == 'individual_files_reports' and self.retain_individual_reports:
+                    # Only move individual_files_reports folder if retention is enabled
+                    subfolders_to_move.append(item)
+            
+            # Move report files to timestamped folder
+            files_moved = 0
+            for report_file in report_files:
+                source_path = os.path.join(self.output_dir, report_file)
+                dest_path = os.path.join(timestamped_folder, report_file)
+                try:
+                    shutil.move(source_path, dest_path)
+                    files_moved += 1
+                    self.logger.debug(f"Moved report: {report_file}")
+                except Exception as e:
+                    self.logger.error(f"Failed to move {report_file}: {e}")
+            
+            # Move subfolders to timestamped folder
+            folders_moved = 0
+            for subfolder in subfolders_to_move:
+                source_path = os.path.join(self.output_dir, subfolder)
+                dest_path = os.path.join(timestamped_folder, subfolder)
+                try:
+                    if os.path.exists(source_path):
+                        shutil.move(source_path, dest_path)
+                        folders_moved += 1
+                        self.logger.debug(f"Moved folder: {subfolder}")
+                except Exception as e:
+                    self.logger.error(f"Failed to move folder {subfolder}: {e}")
+            
+            self.logger.info(f"Report organization complete:")
+            self.logger.info(f"  - {files_moved} report files moved")
+            self.logger.info(f"  - {folders_moved} folders moved")
+            self.logger.info(f"  - All reports organized in: {timestamped_folder}")
+            
+            return timestamped_folder
+            
+        except Exception as e:
+            self.logger.error(f"Error organizing reports into timestamped folder: {e}")
+            return None
 
 def main():
     """Main function."""

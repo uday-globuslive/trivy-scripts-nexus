@@ -64,7 +64,13 @@ def get_config():
         'nexus_username': env_vars.get('NEXUS_USERNAME', os.getenv('NEXUS_USERNAME')),
         'nexus_password': env_vars.get('NEXUS_PASSWORD', os.getenv('NEXUS_PASSWORD')),
         'trivy_path': trivy_path,
-        'output_dir': env_vars.get('OUTPUT_DIR', os.getenv('OUTPUT_DIR', './vulnerability_reports'))
+        'output_dir': env_vars.get('OUTPUT_DIR', os.getenv('OUTPUT_DIR', './vulnerability_reports')),
+        'debug_mode': env_vars.get('DEBUG_MODE', os.getenv('DEBUG_MODE', 'false')).lower() == 'true',
+        'debug_log_level': env_vars.get('DEBUG_LOG_LEVEL', os.getenv('DEBUG_LOG_LEVEL', 'INFO')),
+        'debug_log_file': env_vars.get('DEBUG_LOG_FILE', os.getenv('DEBUG_LOG_FILE', 'false')).lower() == 'true',
+        'debug_trivy_commands': env_vars.get('DEBUG_TRIVY_COMMANDS', os.getenv('DEBUG_TRIVY_COMMANDS', 'false')).lower() == 'true',
+        'debug_http_requests': env_vars.get('DEBUG_HTTP_REQUESTS', os.getenv('DEBUG_HTTP_REQUESTS', 'false')).lower() == 'true',
+        'retain_individual_reports': env_vars.get('RETAIN_INDIVIDUAL_REPORTS', os.getenv('RETAIN_INDIVIDUAL_REPORTS', 'false')).lower() == 'true'
     }
     
     return config
