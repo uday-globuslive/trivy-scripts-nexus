@@ -49,6 +49,13 @@ class CleanNexusScanner:
         # Report retention configuration
         self.retain_individual_reports = config.get('retain_individual_reports', False)
         
+        # Repository filtering configuration
+        repositories_to_scan_str = config.get('repositories_to_scan', '').strip()
+        self.repositories_to_scan = []
+        if repositories_to_scan_str:
+            # Parse comma-separated repository names, removing whitespace
+            self.repositories_to_scan = [repo.strip() for repo in repositories_to_scan_str.split(',') if repo.strip()]
+        
         # Create separate error and skip tracking
         self.scan_issues = {
             'errors': [],
@@ -112,6 +119,21 @@ class CleanNexusScanner:
         self.logger.info(f"Initialized intelligent scanner with Nexus: {self.nexus_url}")
         self.logger.info(f"Using Trivy: {self.trivy_path}")
         
+        # Log repository filtering configuration
+        if self.repositories_to_scan:
+            self.logger.info(f"Repository filtering enabled: will scan only {len(self.repositories_to_scan)} repositories: {', '.join(self.repositories_to_scan)}")
+        else:
+            self.logger.info("Repository filtering disabled: will scan all repositories")
+        
+        # Log scanning configuration details
+        self.logger.info("=== SCANNER CONFIGURATION ===")
+        self.logger.info(f"Nexus URL: {self.nexus_url}")
+        self.logger.info(f"Trivy path: {self.trivy_path}")
+        self.logger.info(f"Output directory: {self.output_dir}")
+        self.logger.info(f"Debug mode: {self.debug_mode}")
+        self.logger.info(f"Retain individual reports: {self.retain_individual_reports}")
+        self.logger.info("=============================")
+        
         # Debug Trivy version
         try:
             trivy_version_cmd = [self.trivy_path, "--version"]
@@ -135,11 +157,22 @@ class CleanNexusScanner:
             'scan_errors': 0
         }
         
+        # Report organization statistics
+        self.report_stats = {
+            'reports_with_vulnerabilities': 0,
+            'empty_reports': 0,
+            'total_reports_saved': 0
+        }
+        
         # Intelligent detection statistics using Counter for easy incrementation
         self.statistics = {
             'repository_types': Counter(),
             'artifact_types': Counter()
         }
+        
+        # Enhanced individual reports directory structure
+        self.individual_reports_dir = os.path.join(self.output_dir, 'individual_files_reports')
+        os.makedirs(self.individual_reports_dir, exist_ok=True)
         
         # Artifact type detection patterns
         self.artifact_patterns = {
@@ -217,95 +250,94 @@ class CleanNexusScanner:
             self.logger.debug(f"Successful scan logged: {scan_record}")
     
     def save_scan_issues_report(self, scan_timestamp: str):
-        """Save scan issues to a separate report file."""
+        """Save scan issues to separate report files with repository-wise organization."""
         try:
+            # Create timestamped folder
+            timestamped_folder = os.path.join(self.output_dir, f"scan_reports_{scan_timestamp.replace(':', '-')}")
+            os.makedirs(timestamped_folder, exist_ok=True)
+            
             # Create issues report filename
             issues_filename = f"scan_issues_report_{scan_timestamp.replace(':', '-')}.json"
-            issues_filepath = os.path.join(self.output_dir, issues_filename)
+            issues_filepath = os.path.join(timestamped_folder, issues_filename)
             
             # Prepare comprehensive issues report
             issues_report = {
                 'scan_metadata': {
                     'timestamp': scan_timestamp,
                     'nexus_url': self.nexus_url,
+                    'repositories_requested': self.repositories_to_scan if self.repositories_to_scan else 'ALL',
                     'total_errors': len(self.scan_issues['errors']),
                     'total_skipped': len(self.scan_issues['skipped_files']),
                     'total_warnings': len(self.scan_issues['warnings']),
                     'total_successful_scans': len(self.scan_issues['successful_scans'])
                 },
-                'summary': {
-                    'errors_by_reason': self._group_issues_by_reason(self.scan_issues['errors']),
-                    'skips_by_reason': self._group_issues_by_reason(self.scan_issues['skipped_files']),
-                    'warnings_by_reason': self._group_issues_by_reason(self.scan_issues['warnings']),
-                    'successful_scans_by_type': self._group_successful_scans_by_type(self.scan_issues['successful_scans'])
-                },
-                'detailed_issues': {
+                'scan_issues': {
                     'errors': self.scan_issues['errors'],
-                    'skipped_files': self.scan_issues['skipped_files'],
-                    'warnings': self.scan_issues['warnings']
-                },
-                'successful_scans': self.scan_issues['successful_scans']
+                    'skipped_files': self.scan_issues['skipped_files'], 
+                    'warnings': self.scan_issues['warnings'],
+                    'successful_scans': self.scan_issues['successful_scans']
+                }
             }
             
-            # Save to JSON file
+            # Save JSON report
             with open(issues_filepath, 'w', encoding='utf-8') as f:
-                json.dump(issues_report, f, indent=2, ensure_ascii=False)
+                json.dump(issues_report, f, indent=2, default=str)
             
-            # Also create a human-readable CSV for skipped files
-            csv_filename = f"skipped_files_report_{scan_timestamp.replace(':', '-')}.csv"
-            csv_filepath = os.path.join(self.output_dir, csv_filename)
+            self.logger.info(f"Scan issues report saved: {issues_filepath}")
             
-            if self.scan_issues['skipped_files']:
-                with open(csv_filepath, 'w', newline='', encoding='utf-8') as f:
-                    fieldnames = ['timestamp', 'repository', 'component', 'asset', 'artifact_type', 'reason', 'details']
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    
-                    # Filter out 'type' field from each record
-                    for issue in self.scan_issues['skipped_files']:
-                        row_data = {k: v for k, v in issue.items() if k in fieldnames}
-                        writer.writerow(row_data)
+            # Save CSV reports with repository-wise details
+            self._save_csv_reports(timestamped_folder, scan_timestamp)
             
-            # Create a CSV report for successful scans
-            success_csv_filename = f"successful_scans_report_{scan_timestamp.replace(':', '-')}.csv"
-            success_csv_filepath = os.path.join(self.output_dir, success_csv_filename)
-            
-            if self.scan_issues['successful_scans']:
-                with open(success_csv_filepath, 'w', newline='', encoding='utf-8') as f:
-                    fieldnames = ['timestamp', 'repository', 'component', 'asset', 'artifact_type', 
-                                'scan_strategy', 'vulnerabilities_found', 'scan_type', 'file_size', 'scan_duration']
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    
-                    for scan in self.scan_issues['successful_scans']:
-                        row_data = {k: v for k, v in scan.items() if k in fieldnames}
-                        writer.writerow(row_data)
-            
-            self.logger.info(f"Scan issues report saved to: {issues_filepath}")
-            if self.scan_issues['skipped_files']:
-                self.logger.info(f"Skipped files CSV saved to: {csv_filepath}")
-            if self.scan_issues['successful_scans']:
-                self.logger.info(f"Successful scans CSV saved to: {success_csv_filepath}")
-            
-            # Create a CSV report for error/failed scans
-            error_csv_filename = f"error_scans_report_{scan_timestamp.replace(':', '-')}.csv"
-            error_csv_filepath = os.path.join(self.output_dir, error_csv_filename)
-            
-            if self.scan_issues['errors']:
-                with open(error_csv_filepath, 'w', newline='', encoding='utf-8') as f:
-                    fieldnames = ['timestamp', 'repository', 'component', 'asset', 'artifact_type', 
-                                'reason', 'details']
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    
-                    # Filter out 'type' field from each record
-                    for error in self.scan_issues['errors']:
-                        row_data = {k: v for k, v in error.items() if k in fieldnames}
-                        writer.writerow(row_data)
-                        
-                self.logger.info(f"Error scans CSV saved to: {error_csv_filepath}")
-                
         except Exception as e:
+            self.logger.error(f"Error saving scan issues report: {e}")
+    
+    def _save_csv_reports(self, output_folder: str, scan_timestamp: str):
+        """Save separate CSV reports for errors, skips, warnings, and successful scans."""
+        
+        # CSV report for scan errors
+        if self.scan_issues['errors']:
+            errors_csv = os.path.join(output_folder, f"scan_errors_{scan_timestamp.replace(':', '-')}.csv")
+            with open(errors_csv, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['timestamp', 'repository', 'component', 'asset', 'artifact_type', 'reason', 'details']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for error in self.scan_issues['errors']:
+                    writer.writerow(error)
+            self.logger.info(f"Scan errors CSV saved: {errors_csv}")
+        
+        # CSV report for skipped files  
+        if self.scan_issues['skipped_files']:
+            skipped_csv = os.path.join(output_folder, f"scan_skipped_{scan_timestamp.replace(':', '-')}.csv")
+            with open(skipped_csv, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['timestamp', 'repository', 'component', 'asset', 'artifact_type', 'reason', 'details']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for skipped in self.scan_issues['skipped_files']:
+                    writer.writerow(skipped)
+            self.logger.info(f"Scan skipped CSV saved: {skipped_csv}")
+        
+        # CSV report for successful scans
+        if self.scan_issues['successful_scans']:
+            success_csv = os.path.join(output_folder, f"scan_successful_{scan_timestamp.replace(':', '-')}.csv")
+            with open(success_csv, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['timestamp', 'repository', 'component', 'asset', 'artifact_type', 'scan_strategy', 
+                             'vulnerabilities_found', 'scan_type', 'file_size', 'scan_duration', 'trivy_command']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for success in self.scan_issues['successful_scans']:
+                    writer.writerow(success)
+            self.logger.info(f"Scan successful CSV saved: {success_csv}")
+        
+        # CSV report for warnings
+        if self.scan_issues['warnings']:
+            warnings_csv = os.path.join(output_folder, f"scan_warnings_{scan_timestamp.replace(':', '-')}.csv")
+            with open(warnings_csv, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['timestamp', 'repository', 'component', 'asset', 'artifact_type', 'reason', 'details']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for warning in self.scan_issues['warnings']:
+                    writer.writerow(warning)
+            self.logger.info(f"Scan warnings CSV saved: {warnings_csv}")
             self.logger.error(f"Error saving scan issues report: {e}")
     
     def _group_issues_by_reason(self, issues_list: list) -> dict:
@@ -352,7 +384,7 @@ class CleanNexusScanner:
             return False
     
     def get_repositories(self) -> List[Dict[str, Any]]:
-        """Get all repositories from Nexus."""
+        """Get all repositories from Nexus, optionally filtered by repository names."""
         try:
             response = requests.get(
                 f"{self.nexus_url}/service/rest/v1/repositories",
@@ -362,28 +394,81 @@ class CleanNexusScanner:
             response.raise_for_status()
             repositories = response.json()
             
-            # Filter for hosted repositories (all formats including Docker)
-            hosted_repos = [repo for repo in repositories if repo.get('type') == 'hosted']
+            # Include all repository types (hosted, proxy, group)
+            all_repos = repositories
             
-            # Log repository types found
-            repo_types = {}
-            for repo in hosted_repos:
-                format_type = repo.get('format', 'unknown')
-                repo_types[format_type] = repo_types.get(format_type, 0) + 1
-            
-            self.logger.info(f"Found {len(hosted_repos)} hosted repositories: {dict(repo_types)}")
-            return hosted_repos
+            # Apply repository name filtering if specified
+            if self.repositories_to_scan:
+                filtered_repos = []
+                available_repo_names = [repo.get('name') for repo in all_repos]
+                available_repo_details = {repo.get('name'): {'type': repo.get('type'), 'format': repo.get('format')} for repo in all_repos}
+                
+                self.logger.info(f"Available repositories: {available_repo_names}")
+                self.logger.info(f"Available repository details:")
+                for name, details in available_repo_details.items():
+                    self.logger.info(f"  - {name}: type={details['type']}, format={details['format']}")
+                    
+                self.logger.info(f"Requested repositories: {self.repositories_to_scan}")
+                
+                for repo in all_repos:
+                    if repo.get('name') in self.repositories_to_scan:
+                        filtered_repos.append(repo)
+                
+                missing_repos = [name for name in self.repositories_to_scan if name not in available_repo_names]
+                if missing_repos:
+                    self.logger.warning(f"Requested repositories not found: {missing_repos}")
+                
+                found_repos = [repo.get('name') for repo in filtered_repos]
+                self.logger.info(f"Repository filtering enabled: {len(filtered_repos)}/{len(all_repos)} repositories selected")
+                self.logger.info(f"Scanning repositories: {found_repos}")
+                
+                # Log repository types being scanned
+                repo_types = {}
+                for repo in filtered_repos:
+                    repo_type = repo.get('type')
+                    repo_format = repo.get('format')
+                    key = f"{repo_format}-{repo_type}"
+                    repo_types[key] = repo_types.get(key, 0) + 1
+                
+                if repo_types:
+                    self.logger.info(f"Repository types to scan: {dict(repo_types)}")
+                
+                return filtered_repos
+            else:
+                # Filter for hosted repositories only when no specific filtering is requested
+                hosted_repos = [repo for repo in all_repos if repo.get('type') == 'hosted']
+                self.logger.info("Repository filtering disabled: scanning all hosted repositories")
+                
+                # Log repository types found
+                repo_types = {}
+                for repo in hosted_repos:
+                    format_type = repo.get('format', 'unknown')
+                    repo_types[format_type] = repo_types.get(format_type, 0) + 1
+                
+                self.logger.info(f"Found {len(hosted_repos)} hosted repositories: {dict(repo_types)}")
+                return hosted_repos
             
         except Exception as e:
             self.logger.error(f"Error getting repositories: {e}")
             return []
     
-    def get_repository_components(self, repository_name: str) -> List[Dict[str, Any]]:
+    def get_repository_components(self, repository_name: str, repository_type: str = 'hosted') -> List[Dict[str, Any]]:
         """Get all components from a specific repository using pagination."""
         components = []
         continuation_token = None
         
         try:
+            # Handle different repository types
+            if repository_type == 'group':
+                self.logger.info(f"Repository '{repository_name}' is a group repository - checking for cached components")
+                # Group repositories aggregate other repositories, try to get components anyway
+                # Some group repos might have cached content
+            elif repository_type == 'proxy':
+                self.logger.info(f"Repository '{repository_name}' is a proxy repository - checking for cached content")
+                # Proxy repositories cache remote content, should be scannable
+            else:
+                self.logger.info(f"Repository '{repository_name}' is a hosted repository")
+            
             while True:
                 # Build URL with pagination
                 url = f"{self.nexus_url}/service/rest/v1/components"
@@ -392,7 +477,21 @@ class CleanNexusScanner:
                 if continuation_token:
                     params['continuationToken'] = continuation_token
                 
+                if self.debug_http_requests:
+                    self.logger.debug(f"HTTP GET: {url} with params: {params}")
+                
                 response = requests.get(url, auth=self.auth, params=params, timeout=30)
+                
+                if self.debug_http_requests:
+                    self.logger.debug(f"Response status: {response.status_code}")
+                
+                if response.status_code == 404:
+                    self.logger.warning(f"Repository '{repository_name}' not found or no components endpoint")
+                    break
+                elif response.status_code == 403:
+                    self.logger.warning(f"Access denied to repository '{repository_name}' - insufficient permissions")
+                    break
+                
                 response.raise_for_status()
                 
                 data = response.json()
@@ -406,7 +505,12 @@ class CleanNexusScanner:
                     
                 self.logger.info(f"Retrieved {len(batch_components)} components (total: {len(components)})")
             
-            self.logger.info(f"Found {len(components)} components in '{repository_name}'")
+            if repository_type == 'group' and len(components) == 0:
+                self.logger.info(f"Group repository '{repository_name}' has no direct components (this is normal for group repositories)")
+            elif repository_type == 'proxy' and len(components) == 0:
+                self.logger.info(f"Proxy repository '{repository_name}' has no cached components yet")
+            
+            self.logger.info(f"Found {len(components)} components in '{repository_name}' ({repository_type} repository)")
             return components
             
         except Exception as e:
@@ -571,12 +675,25 @@ class CleanNexusScanner:
         vulnerabilities = []
         
         if not trivy_results:
+            self.logger.debug("No Trivy results provided to extract_vulnerabilities")
             return vulnerabilities
-            
+        
+        self.logger.debug(f"Trivy results structure: {list(trivy_results.keys())}")
+        
         results = trivy_results.get('Results', [])
-        for result in results:
+        self.logger.debug(f"Found {len(results)} result sections in Trivy output")
+        
+        for i, result in enumerate(results):
             target = result.get('Target', 'Unknown')
             vulns = result.get('Vulnerabilities', [])
+            self.logger.debug(f"Result {i+1}: Target='{target}', Vulnerabilities={len(vulns) if vulns else 0}")
+            
+            if not vulns:
+                # Check if there are other types of findings
+                other_keys = [k for k in result.keys() if k not in ['Target', 'Class', 'Type']]
+                if other_keys:
+                    self.logger.debug(f"Result {i+1} has other keys: {other_keys}")
+                continue
             
             for vuln in vulns:
                 vulnerability = {
@@ -592,6 +709,7 @@ class CleanNexusScanner:
                 }
                 vulnerabilities.append(vulnerability)
         
+        self.logger.debug(f"Extracted {len(vulnerabilities)} vulnerabilities total")
         return vulnerabilities
     
     def scan_with_strategy(self, file_path: str, strategy: dict, artifact_type: str) -> Optional[tuple]:
@@ -673,47 +791,129 @@ class CleanNexusScanner:
         all_vulnerabilities = []
         scan_timestamp = datetime.now().isoformat()
         
-        self.logger.info(f"Starting scan of {len(repositories)} repositories")
+        # Pre-scan diagnostic summary
+        self.logger.info("=" * 60)
+        self.logger.info("PRE-SCAN DIAGNOSTIC SUMMARY")
+        self.logger.info("=" * 60)
+        self.logger.info(f"Scan timestamp: {scan_timestamp}")
+        if self.repositories_to_scan:
+            self.logger.info(f"Repository filtering: ENABLED (requested {len(self.repositories_to_scan)} specific repositories)")
+            missing_repos = []
+            for requested_repo in self.repositories_to_scan:
+                if not any(repo['name'] == requested_repo for repo in repositories):
+                    missing_repos.append(requested_repo)
+            if missing_repos:
+                self.logger.warning(f"⚠️  Missing requested repositories: {missing_repos}")
+                self.logger.info(f"✅ Found {len(repositories)}/{len(self.repositories_to_scan)} requested repositories")
+            else:
+                self.logger.info(f"✅ All requested repositories found: {len(repositories)}")
+        else:
+            self.logger.info("Repository filtering: DISABLED (scanning all available repositories)")
         
+        self.logger.info(f"Total repositories to scan: {len(repositories)}")
+        
+        # Repository format breakdown
+        format_counts = {}
+        total_components_preview = 0
+        for repo in repositories:
+            repo_format = repo.get('format', 'unknown')
+            format_counts[repo_format] = format_counts.get(repo_format, 0) + 1
+            
+            # Quick component count check
+            try:
+                components = self.get_repository_components(repo['name'], repo.get('type', 'hosted'))
+                component_count = len(components)
+                total_components_preview += component_count
+                self.logger.info(f"  📦 {repo['name']} ({repo_format}): {component_count} components")
+            except Exception as e:
+                self.logger.warning(f"  ❌ {repo['name']} ({repo_format}): Error checking components - {e}")
+        
+        self.logger.info(f"Repository format breakdown: {dict(format_counts)}")
+        self.logger.info(f"Total components across all repositories: {total_components_preview}")
+        
+        if total_components_preview == 0:
+            self.logger.warning("🚨 WARNING: No components found in any repository!")
+            self.logger.warning("   The scan will complete quickly but find no vulnerabilities.")
+            self.logger.warning("   This is expected if repositories are empty or newly created.")
+        
+        if self.repositories_to_scan and missing_repos:
+            self.logger.info("💡 TIP: Check repository names in Nexus UI or via REST API")
+            self.logger.info(f"    Available repositories can be listed at: {self.nexus_url}/service/rest/v1/repositories")
+        
+        self.logger.info("=" * 60)
+        self.logger.info("STARTING DETAILED SCAN...")
+        self.logger.info("=" * 60)
+
         for repo in repositories:
             repo_name = repo['name']
-            self.logger.info(f"Scanning repository: {repo_name}")
+            repo_format = repo.get('format', 'unknown')
+            repo_type = repo.get('type', 'hosted')
+            self.logger.info(f"=== SCANNING REPOSITORY: {repo_name} (format: {repo_format}, type: {repo_type}) ===")
             self.stats['repositories_scanned'] += 1
             
-            components = self.get_repository_components(repo_name)
-            self.stats['components_found'] += len(components)
+            components = self.get_repository_components(repo_name, repo_type)
+            component_count = len(components)
+            self.stats['components_found'] += component_count
             
-            for component in components:
+            self.logger.info(f"Repository {repo_name} contains {component_count} components")
+            
+            if component_count == 0:
+                if repo_type == 'group':
+                    self.logger.info(f"Group repository {repo_name} has no direct components (normal behavior)")
+                elif repo_type == 'proxy':
+                    self.logger.info(f"Proxy repository {repo_name} has no cached components yet")
+                else:
+                    self.logger.warning(f"Repository {repo_name} is empty - no components to scan")
+                continue
+
+            for i, component in enumerate(components, 1):
                 component_name = component.get('name', 'unknown')
                 component_version = component.get('version', 'unknown')
                 
-                self.logger.info(f"Processing component: {component_name}:{component_version}")
+                self.logger.info(f"Processing component {i}/{component_count}: {component_name}:{component_version}")
                 
+                # Analyze component assets
                 assets = component.get('assets', [])
-                # Handle different repository formats
-                repo_format = repo.get('format', 'unknown')
+                asset_count = len(assets)
+                self.logger.info(f"  Component has {asset_count} assets")
                 
+                # Log asset details for diagnostic purposes
+                for j, asset in enumerate(assets[:5], 1):  # Log first 5 assets
+                    asset_name = asset.get('path', asset.get('name', 'unknown'))
+                    asset_size = asset.get('fileSize', 'unknown')
+                    download_url = asset.get('downloadUrl', '')
+                    self.logger.debug(f"    Asset {j}: {asset_name} (size: {asset_size}, has_url: {bool(download_url)})")
+                
+                if asset_count > 5:
+                    self.logger.debug(f"    ... and {asset_count - 5} more assets")
+                
+                # Handle different repository formats
                 if repo_format == 'docker':
+                    self.logger.info(f"  Using Docker scanning strategy for {component_name}:{component_version}")
                     # For Docker repositories, scan container images
                     vulnerabilities = self.scan_docker_components(component, repo_name, scan_timestamp)
                     all_vulnerabilities.extend(vulnerabilities)
                 else:
+                    self.logger.info(f"  Using asset-by-asset scanning strategy")
                     # For other formats, scan individual assets
-                    assets = component.get('assets', [])
-                    for asset in assets:
+                    for k, asset in enumerate(assets, 1):
                         asset_name = asset.get('path', asset.get('name', 'unknown'))
                         download_url = asset.get('downloadUrl', '')
                         
+                        self.logger.info(f"    Processing asset {k}/{asset_count}: {asset_name}")
+                        
                         if not download_url:
+                            self.logger.warning(f"    Asset {asset_name} has no download URL - skipping")
                             continue
                         
                         # Detect artifact type and determine scanning strategy
                         artifact_type = self.detect_artifact_type(asset_name, repo_format)
                         self.statistics['artifact_types'][artifact_type] += 1
-                        self.logger.debug(f"Detected artifact type: {artifact_type}")
+                        self.logger.info(f"    Detected artifact type: {artifact_type}")
                         
                         strategy = self.determine_scan_strategy(artifact_type, asset_name, repo_format)
-                        self.logger.debug(f"Scan strategy: {strategy}")
+                        self.logger.info(f"    Scan strategy: {strategy['reason']}")
+                        self.logger.debug(f"    Full strategy: {strategy}")
                         
                         if strategy['skip_scan']:
                             # Log skip with detailed asset information
@@ -724,22 +924,25 @@ class CleanNexusScanner:
                                 'artifact_type': artifact_type
                             }
                             self.log_scan_issue('skip', asset_info, strategy['reason'], f"Download URL: {download_url}")
+                            self.logger.info(f"    SKIPPED: {strategy['reason']}")
                             continue
                         
-                        self.logger.info(f"Scanning asset: {asset_name} (Type: {artifact_type})")
-                        self.logger.info(f"Strategy: {strategy['reason']}")
+                        self.logger.info(f"    SCANNING: {asset_name} (Type: {artifact_type})")
+                        self.logger.info(f"    Strategy: {strategy['reason']}")
                         self.stats['assets_scanned'] += 1
                         
                         # Create local filename for download
                         safe_filename = asset_name.replace('/', '_').replace('\\', '_')
                         local_path = os.path.join(self.output_dir, 'temp', safe_filename)
                         
-                        self.logger.debug(f"Download URL: {download_url}")
-                        self.logger.debug(f"Local path: {local_path}")
+                        self.logger.debug(f"    Download URL: {download_url}")
+                        self.logger.debug(f"    Local path: {local_path}")
                         
                         # Download and scan
+                        download_start = datetime.now()
                         if self.download_asset(download_url, local_path):
-                            self.logger.debug(f"Asset downloaded successfully")
+                            download_time = str(datetime.now() - download_start)
+                            self.logger.info(f"    Downloaded in {download_time}")
                             
                             # Use intelligent scanning strategy
                             scan_start_time = datetime.now()
@@ -747,10 +950,25 @@ class CleanNexusScanner:
                             scan_end_time = datetime.now()
                             scan_duration = str(scan_end_time - scan_start_time)
                             
+                            self.logger.info(f"    Scan completed in {scan_duration}")
+                            
                             if scan_results and scan_results[0]:  # Check JSON results
                                 json_data, html_content = scan_results
                                 vulnerabilities = self.extract_vulnerabilities(json_data)
-                                self.stats['vulnerabilities_found'] += len(vulnerabilities)
+                                vuln_count = len(vulnerabilities)
+                                self.stats['vulnerabilities_found'] += vuln_count
+                                
+                                self.logger.info(f"    SCAN RESULT: Found {vuln_count} vulnerabilities")
+                                
+                                if vuln_count > 0:
+                                    # Log vulnerability summary by severity
+                                    severity_counts = {}
+                                    for vuln in vulnerabilities:
+                                        severity = vuln.get('severity', 'UNKNOWN')
+                                        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+                                    
+                                    severity_summary = ", ".join([f"{severity}: {count}" for severity, count in severity_counts.items()])
+                                    self.logger.info(f"    Vulnerability breakdown: {severity_summary}")
                                 
                                 # Log successful scan with details
                                 file_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
@@ -787,7 +1005,7 @@ class CleanNexusScanner:
                                 
                                 # Save individual HTML report for all successful scans
                                 if html_content:
-                                    self.save_individual_html_report(html_content, component_name, asset_name, scan_timestamp)
+                                    self.save_individual_html_report(html_content, component_name, asset_name, repository_name, scan_timestamp, len(vulnerabilities))
                                 
                                 # Immediately delete downloaded file to free up space
                                 try:
@@ -800,6 +1018,7 @@ class CleanNexusScanner:
                                 if vulnerabilities:
                                     self.logger.info(f"Found {len(vulnerabilities)} vulnerabilities in {asset_name}")
                             else:
+                                self.logger.warning(f"    SCAN FAILED: Trivy scan returned no results")
                                 # Log scan error with detailed information
                                 asset_info = {
                                     'repository': repo_name,
@@ -807,7 +1026,7 @@ class CleanNexusScanner:
                                     'asset': asset_name,
                                     'artifact_type': artifact_type
                                 }
-                                self.log_scan_issue('error', asset_info, 'Trivy scan failed', f"Strategy: {strategy['reason']}, Path: {local_path}")
+                                self.log_scan_issue('error', asset_info, 'Trivy scan failed - no results returned', f"Strategy: {strategy['reason']}, Path: {local_path}")
                                 self.stats['scan_errors'] += 1
                                 
                                 # Delete downloaded file even if scan failed to free up space
@@ -818,6 +1037,8 @@ class CleanNexusScanner:
                                 except Exception as e:
                                     self.logger.debug(f"Could not delete downloaded file {local_path}: {e}")
                         else:
+                            self.logger.error(f"    DOWNLOAD FAILED: Could not download {asset_name}")
+                            # Log download error
                             # Log download error
                             asset_info = {
                                 'repository': repo_name,
@@ -881,6 +1102,14 @@ class CleanNexusScanner:
         # Repository format-based detection for Docker repositories
         if repo_format == 'docker':
             return 'container_image'
+        
+        # Repository format-based detection for npm repositories
+        if repo_format == 'npm':
+            # For npm repositories, most files are Node packages
+            if asset_lower.endswith('.tgz') or 'package' in asset_lower:
+                return 'node_package'
+            else:
+                return 'node_package'  # Default for npm repos
         
         # Hash/checksum files should be detected first
         if any(asset_lower.endswith(ext) for ext in ['.md5', '.sha1', '.sha256', '.sha512']):
@@ -981,6 +1210,30 @@ class CleanNexusScanner:
                 'reason': 'Python package - scan for dependencies'
             })
         
+        # Node/npm packages - need extraction for proper dependency analysis
+        elif artifact_type == 'node_package':
+            if file_path.endswith('.tgz') or file_path.endswith('.tar.gz'):
+                strategy.update({
+                    'scan_type': 'fs',
+                    'extract_before_scan': True,  # Extract .tgz to find package.json
+                    'scan_as_archive': False,     # Scan extracted contents, not archive
+                    'reason': 'Node/npm package (.tgz) - extract and scan for dependencies'
+                })
+            else:
+                strategy.update({
+                    'scan_type': 'fs',
+                    'scan_as_archive': True,
+                    'reason': 'Node/npm package - scan for dependencies'
+                })
+        
+        # NuGet packages
+        elif artifact_type == 'nuget_package':
+            strategy.update({
+                'scan_type': 'fs',
+                'scan_as_archive': True,
+                'reason': 'NuGet package - scan for dependencies'
+            })
+
         # Archives that might contain source code
         elif artifact_type in ['archive', 'source_code']:
             strategy.update({
@@ -1008,6 +1261,14 @@ class CleanNexusScanner:
             strategy.update({
                 'skip_scan': True,
                 'reason': 'Existing security report - skip to avoid recursion'
+            })
+        
+        # Default case - attempt filesystem scan for unrecognized types
+        else:
+            strategy.update({
+                'scan_type': 'fs',
+                'extract_before_scan': False,
+                'reason': f'Unknown artifact type ({artifact_type}) - attempting filesystem scan'
             })
         
         return strategy
@@ -1170,7 +1431,7 @@ class CleanNexusScanner:
                     try:
                         with open(html_output_file, 'r', encoding='utf-8') as f:
                             html_content = f.read()
-                        self.save_individual_html_report(html_content, component_name, f"docker_image_{component_version}", "docker_scan")
+                        self.save_individual_html_report(html_content, component_name, f"docker_image_{component_version}", repository_name, "docker_scan", len(vulnerabilities))
                         self.logger.debug("Docker HTML report saved")
                     except Exception as e:
                         self.logger.error(f"Error saving Docker HTML report: {e}")
@@ -1195,26 +1456,38 @@ class CleanNexusScanner:
             self.logger.debug(f"Docker scan exception details: ", exc_info=True)
             return []
     
-    def save_individual_html_report(self, html_content: str, component_name: str, asset_name: str, timestamp: str):
-        """Save individual HTML report for assets with vulnerabilities."""
+    def save_individual_html_report(self, html_content: str, component_name: str, asset_name: str, repository_name: str, timestamp: str, vulnerability_count: int = 0):
+        """Save individual HTML report for assets, organizing by vulnerability status."""
         try:
             # Create safe filename
             safe_component = component_name.replace('/', '_').replace(':', '_')
             safe_asset = asset_name.replace('/', '_').replace('\\', '_')
+            safe_repository = repository_name.replace('/', '_').replace(':', '_')
             
             if self.retain_individual_reports:
-                # Create individual_files_reports directory if it doesn't exist
-                individual_reports_dir = os.path.join(self.output_dir, 'individual_files_reports')
-                os.makedirs(individual_reports_dir, exist_ok=True)
+                # Create repository-wise directory structure with vulnerability status
+                if vulnerability_count > 0:
+                    # Reports with vulnerabilities
+                    base_dir = os.path.join(self.individual_reports_dir, "with_vulnerabilities", safe_repository)
+                    status_info = f"({vulnerability_count} vulnerabilities)"
+                    self.report_stats['reports_with_vulnerabilities'] += 1
+                else:
+                    # Empty reports (no vulnerabilities)
+                    base_dir = os.path.join(self.individual_reports_dir, "empty_reports", safe_repository)
+                    status_info = "(clean - no vulnerabilities)"
+                    self.report_stats['empty_reports'] += 1
+                
+                os.makedirs(base_dir, exist_ok=True)
                 
                 # Use structured filename: component_name_asset_name_report.html
                 filename = f"{safe_component}_{safe_asset}_report.html"
-                html_file = os.path.join(individual_reports_dir, filename)
+                html_file = os.path.join(base_dir, filename)
                 
                 with open(html_file, 'w', encoding='utf-8') as f:
                     f.write(html_content)
                 
-                self.logger.info(f"Individual HTML report retained: {html_file}")
+                self.report_stats['total_reports_saved'] += 1
+                self.logger.info(f"Individual HTML report retained: {html_file} {status_info}")
                 
             else:
                 # Original behavior - save to main directory temporarily (will be cleaned up)
@@ -1791,55 +2064,111 @@ class CleanNexusScanner:
         return html
     
     def print_summary(self):
-        """Print scan summary."""
-        self.logger.info("=" * 50)
-        self.logger.info("SCAN SUMMARY")
-        self.logger.info("=" * 50)
-        self.logger.info(f"Repositories scanned: {self.stats['repositories_scanned']}")
-        self.logger.info(f"Components found: {self.stats['components_found']}")
-        self.logger.info(f"Assets scanned: {self.stats['assets_scanned']}")
-        self.logger.info(f"Vulnerabilities found: {self.stats['vulnerabilities_found']}")
-        self.logger.info(f"Scan errors: {self.stats['scan_errors']}")
+        """Print comprehensive scan summary with detailed diagnostics."""
+        self.logger.info("=" * 60)
+        self.logger.info("COMPREHENSIVE SCAN SUMMARY")
+        self.logger.info("=" * 60)
         
-        # Issue summary
+        # Basic statistics
+        self.logger.info("BASIC STATISTICS:")
+        self.logger.info(f"  Repositories scanned: {self.stats['repositories_scanned']}")
+        self.logger.info(f"  Components found: {self.stats['components_found']}")
+        self.logger.info(f"  Assets scanned: {self.stats['assets_scanned']}")
+        self.logger.info(f"  Vulnerabilities found: {self.stats['vulnerabilities_found']}")
+        self.logger.info(f"  Scan errors: {self.stats['scan_errors']}")
+        
+        # Issue breakdown
         total_issues = len(self.scan_issues['errors']) + len(self.scan_issues['skipped_files']) + len(self.scan_issues['warnings'])
         total_successful = len(self.scan_issues['successful_scans'])
-        self.logger.info(f"Total issues logged: {total_issues}")
-        self.logger.info(f"  - Errors: {len(self.scan_issues['errors'])}")
-        self.logger.info(f"  - Skipped files: {len(self.scan_issues['skipped_files'])}")
-        self.logger.info(f"  - Warnings: {len(self.scan_issues['warnings'])}")
-        self.logger.info(f"Successful scans: {total_successful}")
         
-        # Successful scan breakdown
+        self.logger.info("")
+        self.logger.info("DETAILED ISSUE BREAKDOWN:")
+        self.logger.info(f"  Total issues logged: {total_issues}")
+        self.logger.info(f"    - Errors: {len(self.scan_issues['errors'])}")
+        self.logger.info(f"    - Skipped files: {len(self.scan_issues['skipped_files'])}")
+        self.logger.info(f"    - Warnings: {len(self.scan_issues['warnings'])}")
+        self.logger.info(f"  Successful scans: {total_successful}")
+        
+        # Successful scan breakdown with vulnerability analysis
         if total_successful > 0:
             clean_scans = sum(1 for scan in self.scan_issues['successful_scans'] if scan.get('vulnerabilities_found', 0) == 0)
             vuln_scans = total_successful - clean_scans
-            self.logger.info(f"  - Clean scans (0 vulnerabilities): {clean_scans}")
-            self.logger.info(f"  - Scans with vulnerabilities: {vuln_scans}")
+            self.logger.info(f"    - Clean scans (0 vulnerabilities): {clean_scans}")
+            self.logger.info(f"    - Scans with vulnerabilities: {vuln_scans}")
+            
+            if vuln_scans > 0:
+                total_vulns_across_scans = sum(scan.get('vulnerabilities_found', 0) for scan in self.scan_issues['successful_scans'])
+                self.logger.info(f"    - Total vulnerabilities across all scans: {total_vulns_across_scans}")
         
-        # Repository types detected
+        # Repository analysis
         self.logger.info("")
-        self.logger.info("Repository Types Detected:")
-        for repo_type, count in self.statistics['repository_types'].items():
-            if count > 0:
-                self.logger.info(f"  {repo_type}: {count}")
-        
-        # Artifact types detected
-        self.logger.info("")
-        self.logger.info("Artifact Types Detected:")
-        for artifact_type, count in self.statistics['artifact_types'].items():
-            if count > 0:
-                self.logger.info(f"  {artifact_type}: {count}")
-        
-        # Report retention status
-        self.logger.info("")
-        self.logger.info("Report Configuration:")
-        if self.retain_individual_reports:
-            self.logger.info("  Individual reports: RETAINED in 'individual_files_reports' folder")
+        self.logger.info("REPOSITORY ANALYSIS:")
+        repo_type_counts = self.statistics['repository_types']
+        if any(count > 0 for count in repo_type_counts.values()):
+            for repo_type, count in repo_type_counts.items():
+                if count > 0:
+                    self.logger.info(f"  {repo_type}: {count} repositories")
         else:
-            self.logger.info("  Individual reports: TEMPORARY (cleaned up after scan)")
+            self.logger.info("  No repository types detected")
         
-        self.logger.info("=" * 50)
+        # Artifact type analysis
+        self.logger.info("")
+        self.logger.info("ARTIFACT TYPE ANALYSIS:")
+        artifact_counts = self.statistics['artifact_types']
+        if any(count > 0 for count in artifact_counts.values()):
+            total_artifacts = sum(count for count in artifact_counts.values())
+            for artifact_type, count in sorted(artifact_counts.items(), key=lambda x: x[1], reverse=True):
+                if count > 0:
+                    percentage = (count / total_artifacts * 100) if total_artifacts > 0 else 0
+                    self.logger.info(f"  {artifact_type}: {count} ({percentage:.1f}%)")
+        else:
+            self.logger.info("  No artifacts processed")
+        
+        # Configuration summary
+        self.logger.info("")
+        self.logger.info("CONFIGURATION SUMMARY:")
+        self.logger.info(f"  Debug mode: {self.debug_mode}")
+        self.logger.info(f"  Repository filtering: {'ENABLED' if self.repositories_to_scan else 'DISABLED'}")
+        if self.repositories_to_scan:
+            self.logger.info(f"    Filtered repositories: {', '.join(self.repositories_to_scan)}")
+        self.logger.info(f"  Individual report retention: {'ENABLED' if self.retain_individual_reports else 'DISABLED'}")
+        
+        # Report organization summary
+        if self.retain_individual_reports and self.report_stats['total_reports_saved'] > 0:
+            self.logger.info("")
+            self.logger.info("INDIVIDUAL REPORT ORGANIZATION:")
+            self.logger.info(f"  Total individual reports saved: {self.report_stats['total_reports_saved']}")
+            self.logger.info(f"  Reports with vulnerabilities: {self.report_stats['reports_with_vulnerabilities']}")
+            self.logger.info(f"    Location: {os.path.join(self.individual_reports_dir, 'with_vulnerabilities')}")
+            self.logger.info(f"  Empty reports (no vulnerabilities): {self.report_stats['empty_reports']}")
+            self.logger.info(f"    Location: {os.path.join(self.individual_reports_dir, 'empty_reports')}")
+            
+            if self.report_stats['reports_with_vulnerabilities'] > 0:
+                percentage_with_vulns = (self.report_stats['reports_with_vulnerabilities'] / self.report_stats['total_reports_saved']) * 100
+                self.logger.info(f"  Vulnerability detection rate: {percentage_with_vulns:.1f}% of scanned files contain vulnerabilities")
+            else:
+                self.logger.info(f"  🧹 All scanned files are clean (no vulnerabilities detected)")
+        
+        # Diagnostic insights
+        self.logger.info("")
+        self.logger.info("DIAGNOSTIC INSIGHTS:")
+        if self.stats['vulnerabilities_found'] == 0:
+            self.logger.warning("  🚨 NO VULNERABILITIES FOUND - Possible reasons:")
+            if self.stats['components_found'] == 0:
+                self.logger.warning("    - No components found in repositories (repositories may be empty)")
+            elif self.stats['assets_scanned'] == 0:
+                self.logger.warning("    - No assets were actually scanned (all skipped or failed to download)")
+            elif len(self.scan_issues['skipped_files']) > 0:
+                self.logger.warning(f"    - {len(self.scan_issues['skipped_files'])} files were skipped (check skip reasons)")
+            elif len(self.scan_issues['errors']) > 0:
+                self.logger.warning(f"    - {len(self.scan_issues['errors'])} scan errors occurred")
+            else:
+                self.logger.info("    - Scanned artifacts may genuinely have no vulnerabilities")
+                self.logger.info("    - Or artifacts may be types that Trivy doesn't analyze for vulnerabilities")
+        else:
+            self.logger.info("  ✅ Vulnerabilities were successfully detected")
+        
+        self.logger.info("=" * 60)
     
     def move_reports_to_timestamped_folder(self, scan_timestamp: str):
         """Create a timestamped folder and move all generated reports into it."""

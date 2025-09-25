@@ -65,6 +65,7 @@ def get_config():
         'nexus_password': env_vars.get('NEXUS_PASSWORD', os.getenv('NEXUS_PASSWORD')),
         'trivy_path': trivy_path,
         'output_dir': env_vars.get('OUTPUT_DIR', os.getenv('OUTPUT_DIR', './vulnerability_reports')),
+        'repositories_to_scan': env_vars.get('REPOSITORIES_TO_SCAN', os.getenv('REPOSITORIES_TO_SCAN', '')),
         'debug_mode': env_vars.get('DEBUG_MODE', os.getenv('DEBUG_MODE', 'false')).lower() == 'true',
         'debug_log_level': env_vars.get('DEBUG_LOG_LEVEL', os.getenv('DEBUG_LOG_LEVEL', 'INFO')),
         'debug_log_file': env_vars.get('DEBUG_LOG_FILE', os.getenv('DEBUG_LOG_FILE', 'false')).lower() == 'true',
@@ -122,6 +123,14 @@ if __name__ == "__main__":
         print("❌ Trivy: Not found")
     
     print(f"📁 Output Directory: {config['output_dir']}")
+    
+    # Show repository filtering status
+    repositories_to_scan_str = config.get('repositories_to_scan', '').strip()
+    if repositories_to_scan_str:
+        repo_list = [repo.strip() for repo in repositories_to_scan_str.split(',') if repo.strip()]
+        print(f"🔍 Repository Filter: {len(repo_list)} repositories ({', '.join(repo_list)})")
+    else:
+        print("🔍 Repository Filter: Disabled (will scan all repositories)")
     
     if missing:
         print(f"\n❌ Missing configuration: {', '.join(missing)}")
