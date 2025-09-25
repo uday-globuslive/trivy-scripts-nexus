@@ -49,6 +49,9 @@ class CleanNexusScanner:
         # Report retention configuration
         self.retain_individual_reports = config.get('retain_individual_reports', False)
         
+        # Performance configuration
+        self.skip_pre_scan_component_count = config.get('skip_pre_scan_component_count', False)
+        
         # Repository filtering configuration
         repositories_to_scan_str = config.get('repositories_to_scan', '').strip()
         self.repositories_to_scan = []
@@ -132,6 +135,13 @@ class CleanNexusScanner:
         self.logger.info(f"Output directory: {self.output_dir}")
         self.logger.info(f"Debug mode: {self.debug_mode}")
         self.logger.info(f"Retain individual reports: {self.retain_individual_reports}")
+        
+        # Performance configuration display
+        if self.skip_pre_scan_component_count:
+            self.logger.info("⚡ Performance mode: FAST STARTUP (skipping pre-scan component counting)")
+        else:
+            self.logger.info("📊 Performance mode: DETAILED (with pre-scan component counting)")
+        
         self.logger.info("=============================")
         
         # Debug Trivy version
@@ -147,6 +157,17 @@ class CleanNexusScanner:
         
         # Create output directory
         os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Create temp directory for downloads
+        self.temp_dir = os.path.join(self.output_dir, 'temp')
+        os.makedirs(self.temp_dir, exist_ok=True)
+        
+        # Log disk space management info
+        self.logger.info("📁 DISK SPACE MANAGEMENT:")
+        self.logger.info(f"   • Downloads are processed ONE AT A TIME to minimize disk usage")
+        self.logger.info(f"   • Files are deleted immediately after scanning")
+        self.logger.info(f"   • Extracted archives are cleaned up automatically")
+        self.logger.info(f"   • Temp directory: {self.temp_dir}")
         
         # Enhanced statistics with artifact type tracking
         self.stats = {
@@ -576,19 +597,48 @@ class CleanNexusScanner:
                 scan_type,
                 "--format", "json",
                 "--output", json_output_file,
-                file_path
             ]
+            
+            # Add enhanced options for better package detection
+            if scan_type == "fs":
+                # Enable all package manager scanners for filesystem scans
+                json_cmd.extend(["--scanners", "vuln"])
+                
+                # For Node.js packages, try to detect package manager files more aggressively
+                if os.path.isdir(file_path):
+                    # Check if this looks like a Node.js package directory
+                    package_json_files = []
+                    for root, dirs, files in os.walk(file_path):
+                        if 'package.json' in files:
+                            package_json_files.append(os.path.join(root, 'package.json'))
+                    
+                    if package_json_files:
+                        self.logger.debug(f"Found {len(package_json_files)} package.json files in {file_path}")
+                        # Add offline mode to prevent network calls for better speed
+                        # json_cmd.extend(["--offline-scan"])
+                        
+            json_cmd.append(file_path)
             
             # HTML scan using Trivy's built-in template
             html_template_path = os.path.join(os.path.dirname(self.trivy_path), 'contrib', 'html.tpl')
+            
+            # For Linux deployment, check if we're using /tmp/tools/trivy path
+            if self.trivy_path == '/tmp/tools/trivy/trivy':
+                html_template_path = '/tmp/tools/trivy/contrib/html.tpl'
+            
             html_cmd = [
                 self.trivy_path,
                 scan_type,
                 "--format", "template",
                 "--template", f"@{html_template_path}",
                 "--output", html_output_file,
-                file_path
             ]
+            
+            # Apply same enhancements to HTML command
+            if scan_type == "fs":
+                html_cmd.extend(["--scanners", "vuln"])
+                
+            html_cmd.append(file_path)
             
             # Add --quiet flag only if not in debug mode
             if not self.debug_mode:
@@ -628,7 +678,7 @@ class CleanNexusScanner:
             json_data = None
             html_content = None
             
-            # Read JSON results
+            # Read JSON results and save to reports directory
             if os.path.exists(json_output_file):
                 try:
                     with open(json_output_file, 'r', encoding='utf-8') as f:
@@ -639,21 +689,45 @@ class CleanNexusScanner:
                             self.logger.debug(f"JSON parsed successfully, type: {type(json_data)}")
                         else:
                             self.logger.debug("JSON file is empty")
+                    
+                    # Save JSON report to individual files directory (actual Trivy JSON output)
+                    if hasattr(self, 'individual_files_dir') and json_content.strip():
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        base_name = os.path.basename(file_path).replace('.', '_')
+                        json_report_path = os.path.join(self.individual_files_dir, 
+                                                      f"{base_name}_trivy_{timestamp}.json")
+                        # Save the raw Trivy JSON output (not our custom structure)
+                        with open(json_report_path, 'w', encoding='utf-8') as f:
+                            f.write(json_content)
+                        self.logger.info(f"Trivy JSON report saved: {json_report_path}")
+                    
                     os.remove(json_output_file)
-                    self.logger.debug("JSON output file cleaned up")
+                    self.logger.debug("Temporary JSON output file cleaned up")
                 except Exception as e:
                     self.logger.error(f"Error parsing JSON results: {e}")
             else:
                 self.logger.warning(f"JSON output file not found: {json_output_file}")
             
-            # Read HTML results
+            # Read HTML results and save to reports directory
             if os.path.exists(html_output_file):
                 try:
                     with open(html_output_file, 'r', encoding='utf-8') as f:
                         html_content = f.read()
                         self.logger.debug(f"HTML file size: {len(html_content)} characters")
+                    
+                    # Save HTML report to individual files directory (actual Trivy HTML output)
+                    if hasattr(self, 'individual_files_dir') and html_content.strip():
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        base_name = os.path.basename(file_path).replace('.', '_')
+                        html_report_path = os.path.join(self.individual_files_dir, 
+                                                      f"{base_name}_trivy_{timestamp}.html")
+                        # Save the raw Trivy HTML output (using html.tpl template)
+                        with open(html_report_path, 'w', encoding='utf-8') as f:
+                            f.write(html_content)
+                        self.logger.info(f"Trivy HTML report saved: {html_report_path}")
+                    
                     os.remove(html_output_file)
-                    self.logger.debug("HTML output file cleaned up")
+                    self.logger.debug("Temporary HTML output file cleaned up")
                 except Exception as e:
                     self.logger.error(f"Error reading HTML results: {e}")
             else:
@@ -750,32 +824,152 @@ class CleanNexusScanner:
         try:
             import zipfile
             import tarfile
+            import json
             
             os.makedirs(extract_dir, exist_ok=True)
             archive_lower = archive_path.lower()
+            extracted = False
             
             if archive_lower.endswith('.zip') or archive_lower.endswith('.jar') or archive_lower.endswith('.war'):
                 with zipfile.ZipFile(archive_path, 'r') as zip_ref:
                     zip_ref.extractall(extract_dir)
-                return True
+                extracted = True
             
             elif archive_lower.endswith(('.tar.gz', '.tgz')):
                 with tarfile.open(archive_path, 'r:gz') as tar_ref:
                     tar_ref.extractall(extract_dir)
-                return True
+                extracted = True
             
             elif archive_lower.endswith('.tar'):
                 with tarfile.open(archive_path, 'r') as tar_ref:
                     tar_ref.extractall(extract_dir)
-                return True
+                extracted = True
             
             else:
                 self.logger.warning(f"Unsupported archive format: {archive_path}")
                 return False
+            
+            # Post-extraction processing for Node.js packages
+            if extracted and archive_lower.endswith(('.tgz', '.tar.gz')):
+                self.enhance_nodejs_package_for_scanning(extract_dir)
+                
+            return extracted
                 
         except Exception as e:
             self.logger.error(f"Error extracting {archive_path}: {e}")
             return False
+    
+    def enhance_nodejs_package_for_scanning(self, extract_dir: str):
+        """
+        Enhance extracted Node.js package to ensure Trivy can scan it properly.
+        Uses the same proven logic as test_trivy_fixed.sh script.
+        """
+        try:
+            # Find package.json files in the extracted directory
+            package_json_files = []
+            for root, dirs, files in os.walk(extract_dir):
+                for file in files:
+                    if file == 'package.json':
+                        package_json_files.append(os.path.join(root, file))
+            
+            for package_json_path in package_json_files:
+                package_dir = os.path.dirname(package_json_path)
+                
+                # Check if lock file already exists
+                lock_files = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml']
+                has_lock_file = any(os.path.exists(os.path.join(package_dir, lock_file)) for lock_file in lock_files)
+                
+                if not has_lock_file:
+                    try:
+                        # Read the original package.json
+                        with open(package_json_path, 'r', encoding='utf-8') as f:
+                            pkg_data = json.load(f)
+                        
+                        name = pkg_data.get('name', 'unknown')
+                        version = pkg_data.get('version', '0.0.0')
+                        dependencies = pkg_data.get('dependencies', {})
+                        
+                        self.logger.debug(f"Creating comprehensive package-lock.json for {name}@{version} with {len(dependencies)} dependencies")
+                        
+                        # Create comprehensive package-lock.json with the exact same structure as test script
+                        lock_data = {
+                            "name": name,
+                            "version": version,
+                            "lockfileVersion": 3,
+                            "requires": True,
+                            "packages": {
+                                "": {
+                                    "name": name,
+                                    "version": version,
+                                    "license": "MIT"
+                                }
+                            },
+                            "dependencies": {}
+                        }
+                        
+                        # Add dependencies to root package if they exist
+                        if dependencies:
+                            lock_data["packages"][""]["dependencies"] = dependencies
+                        
+                        # Add node_modules entries for each dependency (critical for Trivy detection)
+                        for dep_name, dep_version in dependencies.items():
+                            # Clean version (remove ^ ~ >= < etc)
+                            clean_version = dep_version.lstrip('^~>=<')
+                            
+                            # Add to node_modules section (this is what makes Trivy detect npm packages)
+                            lock_data["packages"][f"node_modules/{dep_name}"] = {
+                                "version": clean_version,
+                                "resolved": f"https://registry.npmjs.org/{dep_name}/-/{dep_name}-{clean_version}.tgz",
+                                "integrity": f"sha512-{'0' * 64}",  # Placeholder integrity hash
+                                "license": "MIT"
+                            }
+                            
+                            # Add to dependencies section
+                            lock_data["dependencies"][dep_name] = {
+                                "version": clean_version,
+                                "resolved": f"https://registry.npmjs.org/{dep_name}/-/{dep_name}-{clean_version}.tgz",
+                                "integrity": f"sha512-{'0' * 64}"
+                            }
+                        
+                        # Write the enhanced package-lock.json
+                        lock_file_path = os.path.join(package_dir, 'package-lock.json')
+                        with open(lock_file_path, 'w', encoding='utf-8') as f:
+                            json.dump(lock_data, f, indent=2)
+                        
+                        # Create physical node_modules directory structure (essential for Trivy)
+                        node_modules_dir = os.path.join(package_dir, 'node_modules')
+                        os.makedirs(node_modules_dir, exist_ok=True)
+                        
+                        # Create individual package directories and package.json files for each dependency
+                        for dep_name, dep_version in dependencies.items():
+                            dep_dir = os.path.join(node_modules_dir, dep_name)
+                            os.makedirs(dep_dir, exist_ok=True)
+                            
+                            # Create a minimal package.json for each dependency
+                            clean_version = dep_version.lstrip('^~>=<')
+                            dep_pkg = {
+                                'name': dep_name, 
+                                'version': clean_version
+                            }
+                            dep_pkg_path = os.path.join(dep_dir, 'package.json')
+                            with open(dep_pkg_path, 'w', encoding='utf-8') as f:
+                                json.dump(dep_pkg, f, indent=2)
+                        
+                        lock_size = os.path.getsize(lock_file_path)
+                        self.logger.info(f"✅ Enhanced Node.js package for Trivy scanning: {name}@{version}")
+                        self.logger.info(f"   📦 Created package-lock.json: {lock_size} bytes")
+                        self.logger.info(f"   📁 Created node_modules structure: {len(dependencies)} packages")
+                        self.logger.debug(f"   🔍 Enhanced package at: {package_dir}")
+                        
+                    except Exception as e:
+                        self.logger.error(f"Error creating comprehensive package-lock.json for {package_json_path}: {e}")
+                        self.logger.debug(f"Exception details: ", exc_info=True)
+                else:
+                    self.logger.debug(f"Lock file already exists for Node.js package: {package_json_path}")
+                    
+        except Exception as e:
+            self.logger.error(f"Error enhancing Node.js packages in {extract_dir}: {e}")
+            self.logger.debug(f"Exception details: ", exc_info=True)
     
     def scan_content_repositories(self):
         """Scan all content repositories for vulnerabilities."""
@@ -815,25 +1009,37 @@ class CleanNexusScanner:
         # Repository format breakdown
         format_counts = {}
         total_components_preview = 0
-        for repo in repositories:
-            repo_format = repo.get('format', 'unknown')
-            format_counts[repo_format] = format_counts.get(repo_format, 0) + 1
+        
+        # Pre-scan component count check (optional for performance)
+        if not self.skip_pre_scan_component_count:
+            self.logger.info("Performing pre-scan component analysis...")
+            for repo in repositories:
+                repo_format = repo.get('format', 'unknown')
+                format_counts[repo_format] = format_counts.get(repo_format, 0) + 1
+                
+                # Quick component count check
+                try:
+                    components = self.get_repository_components(repo['name'], repo.get('type', 'hosted'))
+                    component_count = len(components)
+                    total_components_preview += component_count
+                    self.logger.info(f"  📦 {repo['name']} ({repo_format}): {component_count} components")
+                except Exception as e:
+                    self.logger.warning(f"  ❌ {repo['name']} ({repo_format}): Error checking components - {e}")
             
-            # Quick component count check
-            try:
-                components = self.get_repository_components(repo['name'], repo.get('type', 'hosted'))
-                component_count = len(components)
-                total_components_preview += component_count
-                self.logger.info(f"  📦 {repo['name']} ({repo_format}): {component_count} components")
-            except Exception as e:
-                self.logger.warning(f"  ❌ {repo['name']} ({repo_format}): Error checking components - {e}")
-        
-        self.logger.info(f"Repository format breakdown: {dict(format_counts)}")
-        self.logger.info(f"Total components across all repositories: {total_components_preview}")
-        
-        if total_components_preview == 0:
-            self.logger.warning("🚨 WARNING: No components found in any repository!")
-            self.logger.warning("   The scan will complete quickly but find no vulnerabilities.")
+            self.logger.info(f"Repository format breakdown: {dict(format_counts)}")
+            self.logger.info(f"Total components across all repositories: {total_components_preview}")
+            
+            if total_components_preview == 0:
+                self.logger.warning("🚨 WARNING: No components found in any repository!")
+                self.logger.warning("   The scan will complete quickly but find no vulnerabilities.")
+        else:
+            self.logger.info("⚡ Skipping pre-scan component analysis for faster startup...")
+            # Still collect format information without component counting
+            for repo in repositories:
+                repo_format = repo.get('format', 'unknown')
+                format_counts[repo_format] = format_counts.get(repo_format, 0) + 1
+            self.logger.info(f"Repository format breakdown: {dict(format_counts)}")
+            self.logger.info("Component counts will be determined during actual scanning...")
             self.logger.warning("   This is expected if repositories are empty or newly created.")
         
         if self.repositories_to_scan and missing_repos:
@@ -933,7 +1139,7 @@ class CleanNexusScanner:
                         
                         # Create local filename for download
                         safe_filename = asset_name.replace('/', '_').replace('\\', '_')
-                        local_path = os.path.join(self.output_dir, 'temp', safe_filename)
+                        local_path = os.path.join(self.temp_dir, safe_filename)
                         
                         self.logger.debug(f"    Download URL: {download_url}")
                         self.logger.debug(f"    Local path: {local_path}")
@@ -942,7 +1148,8 @@ class CleanNexusScanner:
                         download_start = datetime.now()
                         if self.download_asset(download_url, local_path):
                             download_time = str(datetime.now() - download_start)
-                            self.logger.info(f"    Downloaded in {download_time}")
+                            file_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+                            self.logger.info(f"    Downloaded in {download_time} (size: {file_size:,} bytes)")
                             
                             # Use intelligent scanning strategy
                             scan_start_time = datetime.now()
@@ -1005,13 +1212,14 @@ class CleanNexusScanner:
                                 
                                 # Save individual HTML report for all successful scans
                                 if html_content:
-                                    self.save_individual_html_report(html_content, component_name, asset_name, repository_name, scan_timestamp, len(vulnerabilities))
+                                    self.save_individual_html_report(html_content, component_name, asset_name, repo_name, scan_timestamp, len(vulnerabilities))
                                 
                                 # Immediately delete downloaded file to free up space
                                 try:
                                     if os.path.exists(local_path):
+                                        file_size = os.path.getsize(local_path)
                                         os.remove(local_path)
-                                        self.logger.debug(f"Deleted downloaded file after scan: {os.path.basename(local_path)}")
+                                        self.logger.debug(f"✅ Freed {file_size:,} bytes - deleted: {os.path.basename(local_path)}")
                                 except Exception as e:
                                     self.logger.debug(f"Could not delete downloaded file {local_path}: {e}")
                                 
@@ -1032,8 +1240,9 @@ class CleanNexusScanner:
                                 # Delete downloaded file even if scan failed to free up space
                                 try:
                                     if os.path.exists(local_path):
+                                        file_size = os.path.getsize(local_path)
                                         os.remove(local_path)
-                                        self.logger.debug(f"Deleted downloaded file after failed scan: {os.path.basename(local_path)}")
+                                        self.logger.debug(f"✅ Freed {file_size:,} bytes - deleted: {os.path.basename(local_path)} (scan failed)")
                                 except Exception as e:
                                     self.logger.debug(f"Could not delete downloaded file {local_path}: {e}")
                         else:
@@ -1132,8 +1341,11 @@ class CleanNexusScanner:
         if any(asset_lower.endswith(ext) for ext in ['.nupkg', '.nuspec']):
             return 'nuget_package'
         
-        # Node packages
-        if 'package.json' in asset_lower or asset_lower.endswith('.npm') or (asset_lower.endswith('.tgz') and 'node' in asset_lower):
+        # Node packages - enhanced detection to match successful test script logic
+        if ('package.json' in asset_lower or 
+            asset_lower.endswith('.npm') or 
+            (asset_lower.endswith('.tgz') and ('node' in asset_lower or 'client' in asset_lower or 'npm' in asset_lower)) or
+            asset_lower.endswith('.tar.gz')):
             return 'node_package'
         
         # Container images (only for actual Docker layers/manifests, not in Maven repos)
@@ -1369,6 +1581,11 @@ class CleanNexusScanner:
             
             # HTML scan command  
             html_template_path = os.path.join(os.path.dirname(self.trivy_path), 'contrib', 'html.tpl')
+            
+            # For Linux deployment, check if we're using /tmp/tools/trivy path
+            if self.trivy_path == '/tmp/tools/trivy/trivy':
+                html_template_path = '/tmp/tools/trivy/contrib/html.tpl'
+                
             html_cmd = [
                 self.trivy_path, "image",
                 "--format", "template", 
@@ -1431,7 +1648,7 @@ class CleanNexusScanner:
                     try:
                         with open(html_output_file, 'r', encoding='utf-8') as f:
                             html_content = f.read()
-                        self.save_individual_html_report(html_content, component_name, f"docker_image_{component_version}", repository_name, "docker_scan", len(vulnerabilities))
+                        self.save_individual_html_report(html_content, component_name, f"docker_image_{component_version}", repo_name, "docker_scan", len(vulnerabilities))
                         self.logger.debug("Docker HTML report saved")
                     except Exception as e:
                         self.logger.error(f"Error saving Docker HTML report: {e}")
@@ -1527,25 +1744,33 @@ class CleanNexusScanner:
     def cleanup_downloaded_files(self):
         """Clean up any remaining downloaded files from temp directory (fallback cleanup)."""
         try:
-            temp_dir = os.path.join(self.output_dir, 'temp')
-            if os.path.exists(temp_dir):
-                # Count files before cleanup
+            if os.path.exists(self.temp_dir):
+                # Count files and calculate total size before cleanup
                 file_count = 0
-                for root, dirs, files in os.walk(temp_dir):
-                    file_count += len(files)
+                total_size = 0
+                for root, dirs, files in os.walk(self.temp_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        try:
+                            file_size = os.path.getsize(file_path)
+                            total_size += file_size
+                            file_count += 1
+                        except:
+                            file_count += 1
                 
                 if file_count > 0:
-                    self.logger.info(f"Cleaning up {file_count} remaining downloaded files from temp directory")
+                    self.logger.info(f"🧹 Final cleanup: removing {file_count} remaining files ({total_size:,} bytes) from temp directory")
                     
                     # Remove the entire temp directory and its contents
-                    shutil.rmtree(temp_dir)
-                    self.logger.debug(f"Removed temp directory: {temp_dir}")
+                    shutil.rmtree(self.temp_dir)
+                    self.logger.info(f"✅ Freed {total_size:,} bytes total from temp directory cleanup")
                 else:
-                    self.logger.debug("No remaining downloaded files to clean up")
+                    self.logger.debug("✨ Temp directory already clean - no files to remove")
                     # Remove empty temp directory
-                    os.rmdir(temp_dir)
+                    if os.path.exists(self.temp_dir):
+                        os.rmdir(self.temp_dir)
             else:
-                self.logger.debug("Temp directory does not exist - no files to clean up")
+                self.logger.debug("✨ Temp directory does not exist - no files to clean up")
                 
         except Exception as e:
             self.logger.error(f"Error during downloaded files cleanup: {e}")

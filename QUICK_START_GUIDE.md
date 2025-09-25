@@ -1,35 +1,33 @@
-# 🚀 NEXUS VULNERABILITY SCANNER - SIMPLIFIED & READY TO USE
+# 🚀 NEXUS VULNERABILITY SCANNER - ENHANCED & READY TO USE
 
-## ✅ **WHAT I'VE CREATED FOR YOU**
+## ✅ **WHAT'S AVAILABLE FOR YOU**
 
-I've built a **complete, simplified, ready-to-use** Nexus vulnerability scanning solution that:
+I've enhanced your Nexus vulnerability scanning solution with comprehensive features:
 
-### **🎯 Key Features:**
-- ✅ **Pre-configured** - Uses your existing `.env` file and local `trivy` folder
-- ✅ **No installation needed** - Everything is ready to run
-- ✅ **Windows compatible** - Fixed Unicode/emoji issues
-- ✅ **Smart scanning** - Only scans repositories that have content
-- ✅ **Comprehensive reports** - JSON and CSV output with detailed vulnerability data
+### **🎯 Enhanced Key Features:**
+- ✅ **All Repository Types** - Scans hosted, proxy, and group repositories  
+- ✅ **NPM Package Support** - Extracts .tgz files to scan package.json and dependencies
+- ✅ **Report Organization** - Separates reports with vulnerabilities from clean reports
+- ✅ **Repository Filtering** - Configure which repositories to scan
+- ✅ **Progress Monitoring** - Real-time progress tracking during scans
+- ✅ **Comprehensive CSV Reports** - Separate files for errors, skips, warnings, successful scans
 
-### **📁 Files Created:**
+### **📁 Current Files:**
 
-#### **🚀 Main Scanners:**
-- `windows_scanner.py` - **RECOMMENDED** - Windows-compatible, no emoji issues
-- `focused_scanner.py` - Scans only repositories with content 
-- `simple_nexus_scanner.py` - Full scanner for all repositories
+#### **🚀 Main Scanner:**
+- `clean_nexus_scanner.py` - **ENHANCED** - Complete intelligent scanner
 
 #### **🔧 Utilities:**
 - `config_loader.py` - Handles .env configuration and Trivy detection
-- `simple_quick_analyzer.py` - Quick connectivity and repository analysis
-- `check_all_repos.py` - Shows which repositories have content
+- `monitor_progress.py` - **NEW** - Real-time progress monitoring
 
 #### **🎮 Easy Launchers:**
-- `run_scanner.bat` - Windows batch menu
-- `run_scanner.ps1` - PowerShell menu with options
+- `monitor_scanner.sh` - **NEW** - Launch progress monitor (Linux/Unix)
+- `open_latest_report.bat` - Open most recent scan report (Windows only)
 
 #### **📚 Documentation:**
 - `README.md` - Complete documentation
-- This summary file
+- This quick start guide
 
 ## **🎯 YOUR CURRENT SETUP:**
 
@@ -37,11 +35,9 @@ I've built a **complete, simplified, ready-to-use** Nexus vulnerability scanning
 - **Server**: `http://10.11.53.12:8081`
 - **Username**: `sv-sbom`
 - **Password**: `sbom@sbom`
-
-### **Repositories with Content:**
-- `mccamishsbom` (raw format) - 2 components
-- `mccamish_sbom` (maven2 format) - 9 components
-- **Total**: 11 artifacts ready for scanning
+- **Repository Filtering**: Currently disabled (scans all repositories)
+- **Individual Report Retention**: ✅ Enabled
+- **Debug Logging**: ✅ Enabled
 
 ### **Trivy**: 
 - ✅ Local executable at `./trivy/trivy.exe`
@@ -49,74 +45,124 @@ I've built a **complete, simplified, ready-to-use** Nexus vulnerability scanning
 
 ## **🚀 HOW TO USE:**
 
-### **Option 1: Use the Easy Menu (Recommended)**
-```cmd
-run_scanner.bat
+### **Option 1: Run Full Enhanced Scanner**
+```bash
+python3 clean_nexus_scanner.py
 ```
-Then choose option **5** for focused scanning.
+This will scan all npm repositories and create organized reports.
 
-### **Option 2: Direct Command (Windows Compatible)**
-```cmd
-python windows_scanner.py
-```
+### **Option 2: Monitor Scanner Progress (Recommended)**
+Open **two** terminal windows:
 
-### **Option 3: Quick Test First**
-```cmd
-python simple_quick_analyzer.py
+**Terminal 1** - Run the scanner:
+```bash
+python3 clean_nexus_scanner.py
 ```
 
-## **📊 WHAT HAPPENS WHEN YOU RUN IT:**
+**Terminal 2** - Monitor progress:
+```bash
+python3 monitor_progress.py
+# OR make executable and run:
+chmod +x monitor_scanner.sh
+./monitor_scanner.sh
+```
 
-1. **Connection Test** - Verifies access to your Nexus server
-2. **Trivy Test** - Confirms local Trivy executable works  
-3. **Repository Analysis** - Identifies repositories with content
-4. **Artifact Download** - Downloads each artifact temporarily
-5. **Security Scanning** - Runs Trivy on each artifact
-6. **Vulnerability Analysis** - Extracts and categorizes findings
-7. **Report Generation** - Creates detailed JSON and CSV reports
-8. **Cleanup** - Removes temporary files
+### **Option 3: Configure Repository Filtering**
+Edit `.env` file to scan specific repositories:
+```
+REPOSITORIES_TO_SCAN=npm-hosted,npm-proxy,npm-mcc-libs
+```
 
-## **📋 SAMPLE SCAN RESULTS:**
+## **📊 WHAT THE ENHANCED SCANNER DOES:**
 
-From your latest scan:
-- **Repositories Scanned**: 2
-- **Artifacts Scanned**: 11  
-- **Vulnerabilities Found**: 0
-- **Scan Duration**: ~3 minutes
-- **Reports Generated**: JSON + CSV in `./vulnerability_reports/`
+### **Phase 1: Component Discovery**
+- 🔍 Retrieves all components from each repository
+- 📊 For large npm repos, this can take 10-30 minutes
+- 💡 Progress monitor shows: "Discovering Components"
+
+### **Phase 2: Asset Scanning (Disk Space Efficient)**  
+- 🛡️ Downloads and scans individual assets **ONE AT A TIME**
+- 📦 Extracts npm .tgz files to scan package.json
+- 🗑️ **Immediately deletes** each file after scanning (no disk space buildup)
+- 🔍 Finds vulnerabilities in dependencies
+- 💡 Progress monitor shows: "Scanning Assets for Vulnerabilities"
+
+### **Phase 3: Report Organization**
+- 📄 Creates individual HTML reports for each asset
+- 🗂️ Organizes reports into folders:
+  - `with_vulnerabilities/{repository}/` - Reports containing vulnerabilities
+  - `empty_reports/{repository}/` - Clean reports (no vulnerabilities)
+- 📊 Generates comprehensive CSV reports:
+  - `scan_errors.csv` - Failed scans
+  - `scan_skips.csv` - Skipped files
+  - `scan_warnings.csv` - Scan warnings  
+  - `successful_scans.csv` - Successful scans
+
+## **📁 ENHANCED REPORT STRUCTURE:**
+
+```
+vulnerability_reports/
+├── comprehensive_scan_report_TIMESTAMP.html  # Main HTML report
+├── nexus_scan_results_TIMESTAMP.json         # JSON data
+├── nexus_scan_results_TIMESTAMP.csv          # CSV summary
+├── scan_errors_TIMESTAMP.csv                 # Error details
+├── scan_skips_TIMESTAMP.csv                  # Skipped files
+├── successful_scans_TIMESTAMP.csv            # Success details
+└── individual_files_reports/                 # Individual asset reports
+    ├── with_vulnerabilities/                  # Reports with issues
+    │   ├── npm-hosted/
+    │   ├── npm-proxy/
+    │   └── npm-group/
+    └── empty_reports/                         # Clean reports
+        ├── npm-hosted/
+        ├── npm-proxy/
+        └── npm-group/
+```
+
+## **🔍 PROGRESS MONITORING:**
+
+The progress monitor shows:
+- ⏱️ Runtime elapsed
+- 🎯 Current phase (Discovering Components → Scanning Assets)
+- 📊 Components found, processed, scanned
+- 🚨 Vulnerabilities discovered
+- 📄 Individual reports generated
+- 📂 Report locations
 
 ## **🛠️ TROUBLESHOOTING:**
 
-### **If you see Unicode errors:**
-Use `python windows_scanner.py` instead of the other scripts.
+### **If individual_reports folder is empty:**
+This is normal during the component discovery phase. Reports are generated during asset scanning.
 
-### **If connection fails:**
-1. Run `python config_loader.py` to test configuration
-2. Check if Nexus server is accessible
-3. Verify credentials in `.env` file
+### **For large repositories:**
+- Component discovery can take 10-30 minutes for repositories with thousands of packages
+- Use the progress monitor to track status
+- The scanner will automatically proceed to scanning once discovery is complete
 
-### **If Trivy errors:**
-The local `trivy.exe` should work. If not, check the `trivy` folder contents.
+### **Disk Space Concerns:**
+- ✅ **No disk space issues** - files are downloaded ONE AT A TIME and deleted immediately
+- ✅ Scanner only keeps one file in temp storage at a time
+- ✅ Extracted archives are cleaned up automatically
+- ✅ Final cleanup ensures no temporary files remain
+
+### **If you see many skipped files:**
+Check the `scan_skips.csv` report to understand why files were skipped.
 
 ## **📈 NEXT STEPS:**
 
-1. **Start Here**: Run `python windows_scanner.py` for your first scan
-2. **Review Results**: Check the generated JSON/CSV reports  
-3. **Regular Scanning**: Set up scheduled scans as needed
-4. **Expand Coverage**: Modify repository filters if needed
+1. **Start a Full Scan**: `python clean_nexus_scanner.py`
+2. **Monitor Progress**: `python monitor_progress.py` (in separate window)
+3. **Review Organized Reports**: Check the `individual_files_reports/` folder structure
+4. **Focus on Vulnerabilities**: Review files in `with_vulnerabilities/` folders first
+5. **Verify Clean Files**: Check `empty_reports/` folders for confirmation
 
-## **🎉 YOU'RE ALL SET!**
+## **🎉 YOU'RE ALL SET WITH ENHANCED FEATURES!**
 
-Everything is configured and ready. Just run:
+The enhanced scanner provides:
+- ✅ **Complete npm package scanning** (including package.json dependencies)
+- ✅ **Intelligent report organization** (vulnerabilities vs clean reports)  
+- ✅ **Real-time progress monitoring**
+- ✅ **Repository-wise organization**
+- ✅ **Comprehensive CSV reporting**
 
-```cmd
-python windows_scanner.py
-```
-
-The scanner will:
-- ✅ Connect to your Nexus server automatically
-- ✅ Scan your 11 artifacts for vulnerabilities  
-- ✅ Generate comprehensive reports
-- ✅ Show you exactly what it found
-
-**Total setup time: 0 minutes - it's ready now!** 🚀
+**Run it now:** `python clean_nexus_scanner.py` 🚀

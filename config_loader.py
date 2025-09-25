@@ -35,13 +35,16 @@ def get_trivy_path():
     """Get path to local Trivy executable"""
     script_dir = Path(__file__).parent
     trivy_paths = [
-        script_dir / "trivy" / "trivy.exe",  # Windows
-        script_dir / "trivy" / "trivy",      # Linux/Mac
+        "/tmp/tools/trivy/trivy",               # Linux deployment path
+        script_dir / "trivy" / "trivy.exe",     # Windows local
+        script_dir / "trivy" / "trivy",         # Linux/Mac local
         "trivy"  # Fallback to system PATH
     ]
     
     for trivy_path in trivy_paths:
-        if isinstance(trivy_path, Path) and trivy_path.exists():
+        if isinstance(trivy_path, str) and os.path.exists(trivy_path):
+            return trivy_path
+        elif isinstance(trivy_path, Path) and trivy_path.exists():
             return str(trivy_path.absolute())
         elif isinstance(trivy_path, str):
             # Check if trivy is in PATH
@@ -71,7 +74,8 @@ def get_config():
         'debug_log_file': env_vars.get('DEBUG_LOG_FILE', os.getenv('DEBUG_LOG_FILE', 'false')).lower() == 'true',
         'debug_trivy_commands': env_vars.get('DEBUG_TRIVY_COMMANDS', os.getenv('DEBUG_TRIVY_COMMANDS', 'false')).lower() == 'true',
         'debug_http_requests': env_vars.get('DEBUG_HTTP_REQUESTS', os.getenv('DEBUG_HTTP_REQUESTS', 'false')).lower() == 'true',
-        'retain_individual_reports': env_vars.get('RETAIN_INDIVIDUAL_REPORTS', os.getenv('RETAIN_INDIVIDUAL_REPORTS', 'false')).lower() == 'true'
+        'retain_individual_reports': env_vars.get('RETAIN_INDIVIDUAL_REPORTS', os.getenv('RETAIN_INDIVIDUAL_REPORTS', 'false')).lower() == 'true',
+        'skip_pre_scan_component_count': env_vars.get('SKIP_PRE_SCAN_COMPONENT_COUNT', os.getenv('SKIP_PRE_SCAN_COMPONENT_COUNT', 'false')).lower() == 'true'
     }
     
     return config
