@@ -483,6 +483,280 @@ class CleanNexusScanner:
             self.logger.error(f"Error getting repositories: {e}")
             return []
     
+    def generate_components_csv(self, repositories: List[Dict[str, Any]]) -> str:
+        """Generate a CSV file with component information from all repositories."""
+        csv_filename = f"nexus_components_scan_info_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        csv_path = os.path.join(self.output_dir, csv_filename)
+        
+        try:
+            with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = [
+                    'Repository', 'Repository_Type', 'Repository_Format',
+                    'Component_Name', 'Component_Group', 'Component_Version',
+                    'Asset_Name', 'Asset_Format', 'Date_Uploaded', 'Last_Modified',
+                    'Will_Be_Scanned', 'Skip_Reason'
+                ]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                total_components = 0
+                scanned_components = 0
+                
+                for repo in repositories:
+                    repo_name = repo.get('name', 'Unknown')
+                    repo_type = repo.get('type', 'Unknown')
+                    repo_format = repo.get('format', 'Unknown')
+                    
+                    self.logger.info(f"Fetching components for CSV from repository: {repo_name}")
+                    components = self.get_repository_components(repo_name, repo_type)
+                    
+                    if not components:
+                        # Write repository entry even if no components
+                        writer.writerow({
+                            'Repository': repo_name,
+                            'Repository_Type': repo_type,
+                            'Repository_Format': repo_format,
+                            'Component_Name': 'N/A',
+                            'Component_Group': 'N/A',
+                            'Component_Version': 'N/A',
+                            'Asset_Name': 'N/A',
+                            'Asset_Format': 'N/A',
+                            'Date_Uploaded': 'N/A',
+                            'Last_Modified': 'N/A',
+                            'Will_Be_Scanned': 'No',
+                            'Skip_Reason': 'No components found'
+                        })
+                        continue
+                    
+                    for component in components:
+                        total_components += 1
+                        component_name = component.get('name', 'Unknown')
+                        component_group = component.get('group', 'N/A')
+                        component_version = component.get('version', 'N/A')
+                        
+                        # Check if component will be scanned based on date filtering
+                        will_scan = True
+                        skip_reason = ''
+                        
+                        if self.scan_artifacts_from_date:
+                            # Check the last modified date of component assets
+                            component_date = None
+                            assets = component.get('assets', [])
+                            
+                            for asset in assets:
+                                asset_last_modified = asset.get('lastModified')
+                                if asset_last_modified:
+                                    try:
+                                        # Try multiple date format parsing
+                                        if 'T' in asset_last_modified:
+                                            if asset_last_modified.endswith('Z'):
+                                                asset_date = datetime.strptime(asset_last_modified, '%Y-%m-%dT%H:%M:%S.%fZ')
+                                            elif '+' in asset_last_modified:
+                                                asset_date = datetime.strptime(asset_last_modified.split('+')[0], '%Y-%m-%dT%H:%M:%S.%f')
+                                            else:
+                                                asset_date = datetime.strptime(asset_last_modified, '%Y-%m-%dT%H:%M:%S.%f')
+                                        else:
+                                            asset_date = datetime.strptime(asset_last_modified, '%Y-%m-%d')
+                                        
+                                        if component_date is None or asset_date > component_date:
+                                            component_date = asset_date
+                                    except (ValueError, AttributeError):
+                                        continue
+                            
+                            if component_date and component_date < self.scan_artifacts_from_date:
+                                will_scan = False
+                                skip_reason = f"Component date ({component_date.strftime('%Y-%m-%d')}) is before filter date ({self.scan_artifacts_from_date.strftime('%Y-%m-%d')})"
+                        
+                        if will_scan:
+                            scanned_components += 1
+                        
+                        # Write component assets information
+                        assets = component.get('assets', [])
+                        if assets:
+                            for asset in assets:
+                                asset_name = asset.get('name', 'N/A')
+                                asset_format = asset.get('format', 'N/A')
+                                date_uploaded = asset.get('blobCreated', 'N/A')
+                                last_modified = asset.get('lastModified', 'N/A')
+                                
+                                writer.writerow({
+                                    'Repository': repo_name,
+                                    'Repository_Type': repo_type,
+                                    'Repository_Format': repo_format,
+                                    'Component_Name': component_name,
+                                    'Component_Group': component_group,
+                                    'Component_Version': component_version,
+                                    'Asset_Name': asset_name,
+                                    'Asset_Format': asset_format,
+                                    'Date_Uploaded': date_uploaded,
+                                    'Last_Modified': last_modified,
+                                    'Will_Be_Scanned': 'Yes' if will_scan else 'No',
+                                    'Skip_Reason': skip_reason
+                                })
+                        else:
+                            # Component with no assets
+                            writer.writerow({
+                                'Repository': repo_name,
+                                'Repository_Type': repo_type,
+                                'Repository_Format': repo_format,
+                                'Component_Name': component_name,
+                                'Component_Group': component_group,
+                                'Component_Version': component_version,
+                                'Asset_Name': 'N/A',
+                                'Asset_Format': 'N/A',
+                                'Date_Uploaded': 'N/A',
+                                'Last_Modified': 'N/A',
+                                'Will_Be_Scanned': 'Yes' if will_scan else 'No',
+                                'Skip_Reason': skip_reason
+                            })
+                
+                self.logger.info(f"CSV generated: {csv_path}")
+                self.logger.info(f"Total components found: {total_components}")
+                self.logger.info(f"Components to be scanned: {scanned_components}")
+                self.logger.info(f"Components to be skipped: {total_components - scanned_components}")
+                
+        except Exception as e:
+            self.logger.error(f"Error generating CSV: {e}")
+            return ""
+            
+        return csv_path
+    
+    def generate_components_csv_from_cache(self, repository_components_cache: Dict[str, Dict]) -> str:
+        """Generate a CSV file with component information from cached data."""
+        csv_filename = f"nexus_components_scan_info_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        csv_path = os.path.join(self.output_dir, csv_filename)
+        
+        try:
+            with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = [
+                    'Repository', 'Repository_Type', 'Repository_Format',
+                    'Component_Name', 'Component_Group', 'Component_Version',
+                    'Asset_Name', 'Asset_Format', 'Date_Uploaded', 'Last_Modified',
+                    'Will_Be_Scanned', 'Skip_Reason'
+                ]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                total_components = 0
+                scanned_components = 0
+                
+                for repo_name, repo_data in repository_components_cache.items():
+                    repo = repo_data['repo']
+                    components = repo_data['components']
+                    repo_type = repo.get('type', 'Unknown')
+                    repo_format = repo.get('format', 'Unknown')
+                    
+                    if not components:
+                        # Write repository entry even if no components
+                        writer.writerow({
+                            'Repository': repo_name,
+                            'Repository_Type': repo_type,
+                            'Repository_Format': repo_format,
+                            'Component_Name': 'N/A',
+                            'Component_Group': 'N/A',
+                            'Component_Version': 'N/A',
+                            'Asset_Name': 'N/A',
+                            'Asset_Format': 'N/A',
+                            'Date_Uploaded': 'N/A',
+                            'Last_Modified': 'N/A',
+                            'Will_Be_Scanned': 'No',
+                            'Skip_Reason': 'No components found'
+                        })
+                        continue
+                    
+                    for component in components:
+                        total_components += 1
+                        component_name = component.get('name', 'Unknown')
+                        component_group = component.get('group', 'N/A')
+                        component_version = component.get('version', 'N/A')
+                        
+                        # Check if component will be scanned based on date filtering
+                        will_scan = True
+                        skip_reason = ''
+                        
+                        if self.scan_artifacts_from_date:
+                            # Check the last modified date of component assets
+                            component_date = None
+                            assets = component.get('assets', [])
+                            
+                            for asset in assets:
+                                asset_last_modified = asset.get('lastModified')
+                                if asset_last_modified:
+                                    try:
+                                        # Try multiple date format parsing
+                                        if 'T' in asset_last_modified:
+                                            if asset_last_modified.endswith('Z'):
+                                                asset_date = datetime.strptime(asset_last_modified, '%Y-%m-%dT%H:%M:%S.%fZ')
+                                            elif '+' in asset_last_modified:
+                                                asset_date = datetime.strptime(asset_last_modified.split('+')[0], '%Y-%m-%dT%H:%M:%S.%f')
+                                            else:
+                                                asset_date = datetime.strptime(asset_last_modified, '%Y-%m-%dT%H:%M:%S.%f')
+                                        else:
+                                            asset_date = datetime.strptime(asset_last_modified, '%Y-%m-%d')
+                                        
+                                        if component_date is None or asset_date > component_date:
+                                            component_date = asset_date
+                                    except (ValueError, AttributeError):
+                                        continue
+                            
+                            if component_date and component_date < self.scan_artifacts_from_date:
+                                will_scan = False
+                                skip_reason = f"Component date ({component_date.strftime('%Y-%m-%d')}) is before filter date ({self.scan_artifacts_from_date.strftime('%Y-%m-%d')})"
+                        
+                        if will_scan:
+                            scanned_components += 1
+                        
+                        # Write component assets information
+                        assets = component.get('assets', [])
+                        if assets:
+                            for asset in assets:
+                                asset_name = asset.get('name', 'N/A')
+                                asset_format = asset.get('format', 'N/A')
+                                date_uploaded = asset.get('blobCreated', 'N/A')
+                                last_modified = asset.get('lastModified', 'N/A')
+                                
+                                writer.writerow({
+                                    'Repository': repo_name,
+                                    'Repository_Type': repo_type,
+                                    'Repository_Format': repo_format,
+                                    'Component_Name': component_name,
+                                    'Component_Group': component_group,
+                                    'Component_Version': component_version,
+                                    'Asset_Name': asset_name,
+                                    'Asset_Format': asset_format,
+                                    'Date_Uploaded': date_uploaded,
+                                    'Last_Modified': last_modified,
+                                    'Will_Be_Scanned': 'Yes' if will_scan else 'No',
+                                    'Skip_Reason': skip_reason
+                                })
+                        else:
+                            # Component with no assets
+                            writer.writerow({
+                                'Repository': repo_name,
+                                'Repository_Type': repo_type,
+                                'Repository_Format': repo_format,
+                                'Component_Name': component_name,
+                                'Component_Group': component_group,
+                                'Component_Version': component_version,
+                                'Asset_Name': 'N/A',
+                                'Asset_Format': 'N/A',
+                                'Date_Uploaded': 'N/A',
+                                'Last_Modified': 'N/A',
+                                'Will_Be_Scanned': 'Yes' if will_scan else 'No',
+                                'Skip_Reason': skip_reason
+                            })
+                
+                self.logger.info(f"CSV generated: {csv_path}")
+                self.logger.info(f"Total components found: {total_components}")
+                self.logger.info(f"Components to be scanned: {scanned_components}")
+                self.logger.info(f"Components to be skipped: {total_components - scanned_components}")
+                
+        except Exception as e:
+            self.logger.error(f"Error generating CSV: {e}")
+            return ""
+            
+        return csv_path
+    
     def get_repository_components(self, repository_name: str, repository_type: str = 'hosted') -> List[Dict[str, Any]]:
         """Get all components from a specific repository using pagination."""
         components = []
@@ -992,6 +1266,56 @@ class CleanNexusScanner:
             self.logger.error("No repositories found to scan")
             return
         
+        # Fetch all components once and cache them
+        self.logger.info("=" * 60)
+        self.logger.info("FETCHING REPOSITORY COMPONENTS")
+        self.logger.info("=" * 60)
+        
+        repository_components_cache = {}
+        total_components_found = 0
+        format_counts = Counter()
+        
+        for repo in repositories:
+            repo_name = repo['name']
+            repo_format = repo.get('format', 'unknown')
+            repo_type = repo.get('type', 'hosted')
+            format_counts[repo_format] += 1
+            
+            self.logger.info(f"🔍 Fetching components from: {repo_name} ({repo_format}, {repo_type})")
+            try:
+                components = self.get_repository_components(repo_name, repo_type)
+                repository_components_cache[repo_name] = {
+                    'repo': repo,
+                    'components': components,
+                    'count': len(components)
+                }
+                total_components_found += len(components)
+                self.logger.info(f"  📦 Found {len(components)} components in {repo_name}")
+            except Exception as e:
+                self.logger.warning(f"  ❌ Error fetching components from {repo_name}: {e}")
+                repository_components_cache[repo_name] = {
+                    'repo': repo,
+                    'components': [],
+                    'count': 0
+                }
+        
+        self.logger.info(f"📊 Repository format breakdown: {dict(format_counts)}")
+        self.logger.info(f"📦 Total components across all repositories: {total_components_found}")
+        
+        if total_components_found == 0:
+            self.logger.warning("🚨 WARNING: No components found in any repository!")
+            self.logger.warning("   The scan will complete quickly but find no vulnerabilities.")
+        
+        # Generate CSV file with cached component information
+        self.logger.info("=" * 60)
+        self.logger.info("GENERATING COMPONENTS CSV")
+        self.logger.info("=" * 60)
+        csv_path = self.generate_components_csv_from_cache(repository_components_cache)
+        if csv_path:
+            self.logger.info(f"📄 Components CSV generated: {csv_path}")
+        else:
+            self.logger.warning("⚠️ Failed to generate components CSV")
+        
         all_vulnerabilities = []
         scan_timestamp = datetime.now().isoformat()
         
@@ -1013,74 +1337,48 @@ class CleanNexusScanner:
             self.logger.info(f"Repository filtering: ENABLED (requested {len(self.repositories_to_scan)} specific repositories)")
             missing_repos = []
             for requested_repo in self.repositories_to_scan:
-                if not any(repo['name'] == requested_repo for repo in repositories):
+                if requested_repo not in repository_components_cache:
                     missing_repos.append(requested_repo)
             if missing_repos:
                 self.logger.warning(f"⚠️  Missing requested repositories: {missing_repos}")
-                self.logger.info(f"✅ Found {len(repositories)}/{len(self.repositories_to_scan)} requested repositories")
+                self.logger.info(f"✅ Found {len(repository_components_cache) - len(missing_repos)}/{len(self.repositories_to_scan)} requested repositories")
             else:
-                self.logger.info(f"✅ All requested repositories found: {len(repositories)}")
+                self.logger.info(f"✅ All requested repositories found: {len(repository_components_cache)}")
         else:
             self.logger.info("Repository filtering: DISABLED (scanning all available repositories)")
         
-        self.logger.info(f"Total repositories to scan: {len(repositories)}")
+        self.logger.info(f"Total repositories to scan: {len(repository_components_cache)}")
         
         # Repository format breakdown
         format_counts = {}
         total_components_preview = 0
         
-        # Pre-scan component count check (optional for performance)
-        if not self.skip_pre_scan_component_count:
-            self.logger.info("Performing pre-scan component analysis...")
-            for repo in repositories:
-                repo_format = repo.get('format', 'unknown')
-                format_counts[repo_format] = format_counts.get(repo_format, 0) + 1
-                
-                # Quick component count check
-                try:
-                    components = self.get_repository_components(repo['name'], repo.get('type', 'hosted'))
-                    component_count = len(components)
-                    total_components_preview += component_count
-                    self.logger.info(f"  📦 {repo['name']} ({repo_format}): {component_count} components")
-                except Exception as e:
-                    self.logger.warning(f"  ❌ {repo['name']} ({repo_format}): Error checking components - {e}")
-            
-            self.logger.info(f"Repository format breakdown: {dict(format_counts)}")
-            self.logger.info(f"Total components across all repositories: {total_components_preview}")
-            
-            if total_components_preview == 0:
-                self.logger.warning("🚨 WARNING: No components found in any repository!")
-                self.logger.warning("   The scan will complete quickly but find no vulnerabilities.")
-        else:
-            self.logger.info("⚡ Skipping pre-scan component analysis for faster startup...")
-            # Still collect format information without component counting
-            for repo in repositories:
-                repo_format = repo.get('format', 'unknown')
-                format_counts[repo_format] = format_counts.get(repo_format, 0) + 1
-            self.logger.info(f"Repository format breakdown: {dict(format_counts)}")
-            self.logger.info("Component counts will be determined during actual scanning...")
-            self.logger.warning("   This is expected if repositories are empty or newly created.")
-        
-        if self.repositories_to_scan and missing_repos:
-            self.logger.info("💡 TIP: Check repository names in Nexus UI or via REST API")
-            self.logger.info(f"    Available repositories can be listed at: {self.nexus_url}/service/rest/v1/repositories")
+        if self.repositories_to_scan:
+            missing_repos = []
+            for requested_repo in self.repositories_to_scan:
+                if requested_repo not in repository_components_cache:
+                    missing_repos.append(requested_repo)
+            if missing_repos:
+                self.logger.info("💡 TIP: Check repository names in Nexus UI or via REST API")
+                self.logger.info(f"    Available repositories can be listed at: {self.nexus_url}/service/rest/v1/repositories")
         
         self.logger.info("=" * 60)
         self.logger.info("STARTING DETAILED SCAN...")
         self.logger.info("=" * 60)
 
-        for repo in repositories:
-            repo_name = repo['name']
+        for repo_name, repo_cache_data in repository_components_cache.items():
+            repo = repo_cache_data['repo']
+            components = repo_cache_data['components']
+            component_count = repo_cache_data['count']
+            
             repo_format = repo.get('format', 'unknown')
             repo_type = repo.get('type', 'hosted')
+            
             self.logger.info(f"=== SCANNING REPOSITORY: {repo_name} (format: {repo_format}, type: {repo_type}) ===")
             self.stats['repositories_scanned'] += 1
-            
-            components = self.get_repository_components(repo_name, repo_type)
-            component_count = len(components)
             self.stats['components_found'] += component_count
             
-            self.logger.info(f"Repository {repo_name} contains {component_count} components")
+            self.logger.info(f"Repository {repo_name} contains {component_count} components (from cache)")
             
             if component_count == 0:
                 if repo_type == 'group':
@@ -2471,6 +2769,81 @@ class CleanNexusScanner:
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+"""
+
+        # Vulnerability Details Table
+        if vulns:
+            html += """
+        <div class="vulnerability-details-section">
+            <h2>🔍 Vulnerability Details</h2>
+            <div class="table-container" style="overflow-x: auto; margin: 20px 0; border: 1px solid #ddd; border-radius: 8px;">
+                <table style="width: 100%; border-collapse: collapse; background: white;">
+                    <thead style="background: #f8f9fa; border-bottom: 2px solid #dee2e6;">
+                        <tr>
+                            <th style="padding: 12px; text-align: left; font-weight: 600; color: #495057;">Component</th>
+                            <th style="padding: 12px; text-align: left; font-weight: 600; color: #495057;">Package</th>
+                            <th style="padding: 12px; text-align: left; font-weight: 600; color: #495057;">Vulnerability ID</th>
+                            <th style="padding: 12px; text-align: left; font-weight: 600; color: #495057;">Severity</th>
+                            <th style="padding: 12px; text-align: left; font-weight: 600; color: #495057;">Installed Version</th>
+                            <th style="padding: 12px; text-align: left; font-weight: 600; color: #495057;">Fixed Version</th>
+                            <th style="padding: 12px; text-align: left; font-weight: 600; color: #495057;">Repository</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+            # Sort vulnerabilities by severity for better visibility
+            severity_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3, 'UNKNOWN': 4}
+            sorted_vulns = sorted(vulns, key=lambda x: (severity_order.get(x.get('severity', 'UNKNOWN'), 5), x.get('vulnerability_id', '')))
+            
+            for vuln in sorted_vulns:
+                severity = vuln.get('severity', 'UNKNOWN')
+                severity_color = {
+                    'CRITICAL': '#d73527',
+                    'HIGH': '#fd7e14', 
+                    'MEDIUM': '#ffc107',
+                    'LOW': '#28a745',
+                    'UNKNOWN': '#6c757d'
+                }.get(severity, '#6c757d')
+                
+                severity_bg = {
+                    'CRITICAL': 'rgba(215, 53, 39, 0.1)',
+                    'HIGH': 'rgba(253, 126, 20, 0.1)',
+                    'MEDIUM': 'rgba(255, 193, 7, 0.1)',
+                    'LOW': 'rgba(40, 167, 69, 0.1)',
+                    'UNKNOWN': 'rgba(108, 117, 125, 0.1)'
+                }.get(severity, 'rgba(108, 117, 125, 0.1)')
+                
+                component = vuln.get('component', 'Unknown')
+                package = vuln.get('pkg_name', 'N/A')
+                vuln_id = vuln.get('vulnerability_id', 'N/A')
+                installed_version = vuln.get('pkg_version', 'N/A')
+                fixed_version = vuln.get('fixed_version', 'N/A')
+                repository = vuln.get('repository', 'Unknown')
+                
+                html += f"""
+                        <tr style="border-bottom: 1px solid #dee2e6; background: {severity_bg if severity in ['CRITICAL', 'HIGH'] else 'white'};">
+                            <td style="padding: 10px; font-family: monospace; font-size: 0.9em;">{component}</td>
+                            <td style="padding: 10px; font-family: monospace; font-size: 0.9em;">{package}</td>
+                            <td style="padding: 10px;">
+                                <span style="font-family: monospace; color: #0066cc; font-weight: 500;">{vuln_id}</span>
+                            </td>
+                            <td style="padding: 10px;">
+                                <span style="background: {severity_color}; color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8em; font-weight: 600;">{severity}</span>
+                            </td>
+                            <td style="padding: 10px; font-family: monospace; color: #dc3545;">{installed_version}</td>
+                            <td style="padding: 10px; font-family: monospace; color: #28a745;">{fixed_version}</td>
+                            <td style="padding: 10px; font-size: 0.9em;">{repository}</td>
+                        </tr>
+"""
+            
+            html += """
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin: 10px 0; color: #666; font-size: 0.9em;">
+                <p><strong>📋 Legend:</strong> Critical and High severity vulnerabilities are highlighted with colored backgrounds. Vulnerability details are sorted by severity.</p>
             </div>
         </div>
 """
