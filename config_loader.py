@@ -75,7 +75,8 @@ def get_config():
         'debug_trivy_commands': env_vars.get('DEBUG_TRIVY_COMMANDS', os.getenv('DEBUG_TRIVY_COMMANDS', 'false')).lower() == 'true',
         'debug_http_requests': env_vars.get('DEBUG_HTTP_REQUESTS', os.getenv('DEBUG_HTTP_REQUESTS', 'false')).lower() == 'true',
         'retain_individual_reports': env_vars.get('RETAIN_INDIVIDUAL_REPORTS', os.getenv('RETAIN_INDIVIDUAL_REPORTS', 'false')).lower() == 'true',
-        'skip_pre_scan_component_count': env_vars.get('SKIP_PRE_SCAN_COMPONENT_COUNT', os.getenv('SKIP_PRE_SCAN_COMPONENT_COUNT', 'false')).lower() == 'true'
+        'skip_pre_scan_component_count': env_vars.get('SKIP_PRE_SCAN_COMPONENT_COUNT', os.getenv('SKIP_PRE_SCAN_COMPONENT_COUNT', 'false')).lower() == 'true',
+        'scan_artifacts_from_date': env_vars.get('SCAN_ARTIFACTS_FROM_DATE', os.getenv('SCAN_ARTIFACTS_FROM_DATE', ''))
     }
     
     return config

@@ -52,6 +52,16 @@ class CleanNexusScanner:
         # Performance configuration
         self.skip_pre_scan_component_count = config.get('skip_pre_scan_component_count', False)
         
+        # Date-based artifact filtering
+        scan_artifacts_from_date_str = config.get('scan_artifacts_from_date', '').strip()
+        self.scan_artifacts_from_date = None
+        if scan_artifacts_from_date_str:
+            try:
+                self.scan_artifacts_from_date = datetime.strptime(scan_artifacts_from_date_str, '%Y-%m-%d')
+            except ValueError:
+                print(f"⚠️  Invalid date format for SCAN_ARTIFACTS_FROM_DATE: {scan_artifacts_from_date_str}. Expected format: YYYY-MM-DD")
+                self.scan_artifacts_from_date = None
+        
         # Repository filtering configuration
         repositories_to_scan_str = config.get('repositories_to_scan', '').strip()
         self.repositories_to_scan = []
@@ -990,6 +1000,15 @@ class CleanNexusScanner:
         self.logger.info("PRE-SCAN DIAGNOSTIC SUMMARY")
         self.logger.info("=" * 60)
         self.logger.info(f"Scan timestamp: {scan_timestamp}")
+        
+        # Date-based filtering information
+        if self.scan_artifacts_from_date:
+            self.logger.info(f"Artifact date filtering: ENABLED (scanning artifacts from {self.scan_artifacts_from_date.strftime('%Y-%m-%d')} onwards)")
+            self.logger.info(f"ℹ️  Artifacts uploaded before {self.scan_artifacts_from_date.strftime('%Y-%m-%d')} will be skipped")
+        else:
+            self.logger.info("Artifact date filtering: DISABLED (scanning all artifacts regardless of upload date)")
+        
+        # Repository filtering information
         if self.repositories_to_scan:
             self.logger.info(f"Repository filtering: ENABLED (requested {len(self.repositories_to_scan)} specific repositories)")
             missing_repos = []
@@ -1111,6 +1130,62 @@ class CleanNexusScanner:
                         if not download_url:
                             self.logger.warning(f"    Asset {asset_name} has no download URL - skipping")
                             continue
+                        
+                        # Apply date-based filtering if configured
+                        if self.scan_artifacts_from_date:
+                            asset_last_modified = asset.get('lastModified')
+                            if asset_last_modified:
+                                try:
+                                    # Parse the asset's last modified date with Python 2.7+ compatible parsing
+                                    # Handle common ISO formats from Nexus: 2025-09-15T10:30:45.123Z
+                                    date_str = asset_last_modified
+                                    
+                                    # Remove timezone indicators for consistent parsing
+                                    if date_str.endswith('Z'):
+                                        date_str = date_str[:-1]
+                                    elif '+' in date_str:
+                                        date_str = date_str.split('+')[0]
+                                    elif date_str.endswith('+00:00'):
+                                        date_str = date_str[:-6]
+                                    
+                                    # Handle microseconds - truncate to milliseconds if needed
+                                    if '.' in date_str:
+                                        date_part, frac_part = date_str.split('.')
+                                        # Keep only first 6 digits (microseconds) or 3 digits (milliseconds)
+                                        if len(frac_part) > 6:
+                                            frac_part = frac_part[:6]
+                                        elif len(frac_part) == 3:
+                                            frac_part = frac_part + '000'  # Convert milliseconds to microseconds
+                                        date_str = f"{date_part}.{frac_part}"
+                                    
+                                    # Parse using strptime (compatible with older Python versions)
+                                    try:
+                                        if '.' in date_str:
+                                            asset_date = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S.%f')
+                                        else:
+                                            asset_date = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
+                                    except ValueError:
+                                        # Fallback: try parsing just the date part
+                                        date_only = date_str.split('T')[0]
+                                        asset_date = datetime.strptime(date_only, '%Y-%m-%d')
+                                    
+                                    if asset_date < self.scan_artifacts_from_date:
+                                        self.logger.info(f"    Skipping asset {asset_name} - uploaded {asset_date.strftime('%Y-%m-%d')} (before filter date {self.scan_artifacts_from_date.strftime('%Y-%m-%d')})")
+                                        self.scan_issues['skipped_files'].append({
+                                            'repository': repo_name,
+                                            'component': component_name,
+                                            'asset': asset_name,
+                                            'reason': f'Uploaded before filter date ({asset_date.strftime("%Y-%m-%d")} < {self.scan_artifacts_from_date.strftime("%Y-%m-%d")})',
+                                            'upload_date': asset_date.strftime('%Y-%m-%d')
+                                        })
+                                        continue
+                                    else:
+                                        self.logger.debug(f"    Asset {asset_name} passed date filter - uploaded {asset_date.strftime('%Y-%m-%d')}")
+                                except (ValueError, TypeError) as e:
+                                    self.logger.warning(f"    Could not parse asset date '{asset_last_modified}' for {asset_name}: {e}")
+                                    self.logger.debug(f"    Including asset {asset_name} in scan due to date parsing failure")
+                            else:
+                                self.logger.warning(f"    Asset {asset_name} has no lastModified date - including in scan")
                         
                         # Detect artifact type and determine scanning strategy
                         artifact_type = self.detect_artifact_type(asset_name, repo_format)
@@ -2166,6 +2241,93 @@ class CleanNexusScanner:
         .medium {{ background-color: #f39c12; }}
         .low {{ background-color: #f1c40f; color: #333; }}
         .unknown {{ background-color: #95a5a6; }}
+        
+        /* Enhanced Severity Section Styles */
+        .severity-overview {{
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            margin: 20px 0;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.08);
+        }}
+        .severity-item {{
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+        }}
+        .severity-header {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }}
+        .severity-icon {{
+            font-size: 1.5em;
+            margin-right: 10px;
+        }}
+        .severity-name {{
+            flex: 1;
+            font-size: 1.2em;
+        }}
+        .severity-count {{
+            font-size: 1.5em;
+            color: #2c3e50;
+            margin-right: 10px;
+        }}
+        .severity-percentage {{
+            color: #6c757d;
+            font-size: 1em;
+        }}
+        .severity-bar {{
+            height: 20px;
+            background-color: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }}
+        .severity-bar-fill {{
+            height: 100%;
+            border-radius: 10px;
+            transition: width 0.3s ease;
+        }}
+        .severity-description {{
+            color: #6c757d;
+            font-size: 0.9em;
+            font-style: italic;
+            margin-top: 5px;
+        }}
+        .vulnerability-summary {{
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            margin: 20px 0;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.08);
+        }}
+        .summary-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 15px;
+        }}
+        .summary-item {{
+            text-align: center;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }}
+        .summary-number {{
+            font-size: 2.5em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }}
+        .summary-label {{
+            font-size: 0.9em;
+            opacity: 0.9;
+        }}
+        
         .repo-section {{
             padding: 20px 30px;
         }}
@@ -2226,24 +2388,92 @@ class CleanNexusScanner:
         </div>
 """
 
-        # Severity breakdown
+        # Enhanced Vulnerability Severity Section
         if stats['severity_breakdown']:
             html += """
         <div class="severity-chart">
-            <h2>Vulnerability Severity Distribution</h2>
+            <h2>🚨 Vulnerability Severity Analysis</h2>
+            <div class="severity-overview">
 """
             total_vulns = sum(stats['severity_breakdown'].values())
-            for severity, count in stats['severity_breakdown'].items():
+            
+            # Define severity colors and icons
+            severity_info = {
+                'CRITICAL': {'color': '#8e44ad', 'icon': '🔴', 'description': 'Critical vulnerabilities requiring immediate action'},
+                'HIGH': {'color': '#e74c3c', 'icon': '🟠', 'description': 'High severity vulnerabilities requiring urgent attention'},
+                'MEDIUM': {'color': '#f39c12', 'icon': '🟡', 'description': 'Medium severity vulnerabilities requiring timely resolution'},
+                'LOW': {'color': '#f1c40f', 'icon': '🟢', 'description': 'Low severity vulnerabilities for routine maintenance'},
+                'UNKNOWN': {'color': '#95a5a6', 'icon': '⚪', 'description': 'Unknown severity vulnerabilities requiring assessment'}
+            }
+            
+            # Sort severities by priority
+            severity_order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
+            
+            for severity in severity_order:
+                count = stats['severity_breakdown'].get(severity, 0)
                 if count > 0:
                     percentage = (count / total_vulns) * 100
+                    info = severity_info.get(severity, {'color': '#95a5a6', 'icon': '⚪', 'description': 'Unknown severity'})
+                    
                     html += f"""
-            <div class="severity-bar">
-                <div class="severity-bar-fill {severity.lower()}" style="width: {percentage}%;">
-                    {severity}: {count} ({percentage:.1f}%)
+                <div class="severity-item">
+                    <div class="severity-header">
+                        <span class="severity-icon">{info['icon']}</span>
+                        <span class="severity-name">{severity}</span>
+                        <span class="severity-count">{count:,}</span>
+                        <span class="severity-percentage">({percentage:.1f}%)</span>
+                    </div>
+                    <div class="severity-bar">
+                        <div class="severity-bar-fill {severity.lower()}" style="width: {percentage}%; background-color: {info['color']};">
+                        </div>
+                    </div>
+                    <div class="severity-description">{info['description']}</div>
+                </div>
+"""
+            
+            # Add summary section
+            html += f"""
+            </div>
+            <div class="vulnerability-summary">
+                <h3>📊 Summary</h3>
+                <div class="summary-grid">
+                    <div class="summary-item">
+                        <div class="summary-number" style="color: #d73527;">{stats['severity_breakdown'].get('CRITICAL', 0):,}</div>
+                        <div class="summary-label">🔴 Critical</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-number" style="color: #fd7e14;">{stats['severity_breakdown'].get('HIGH', 0):,}</div>
+                        <div class="summary-label">🟠 High</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-number" style="color: #ffc107;">{stats['severity_breakdown'].get('MEDIUM', 0):,}</div>
+                        <div class="summary-label">🟡 Medium</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-number" style="color: #28a745;">{stats['severity_breakdown'].get('LOW', 0):,}</div>
+                        <div class="summary-label">🟢 Low</div>
+                    </div>
+                </div>
+                <!-- Additional metrics below vulnerability breakdown -->
+                <div class="additional-metrics" style="margin-top: 20px; padding: 15px; background: rgba(0,123,255,0.05); border-radius: 8px; border-left: 4px solid #007bff;">
+                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; text-align: center;">
+                        <div>
+                            <div style="font-size: 1.5em; font-weight: bold; color: #007bff;">{total_vulns:,}</div>
+                            <div style="font-size: 0.9em; color: #666;">Total Vulnerabilities</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 1.5em; font-weight: bold; color: #007bff;">{len(set(v.get('component', 'Unknown') for v in vulns)):,}</div>
+                            <div style="font-size: 0.9em; color: #666;">Affected Components</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 1.5em; font-weight: bold; color: #007bff;">{len(set(v.get('repository', 'Unknown') for v in vulns)):,}</div>
+                            <div style="font-size: 0.9em; color: #666;">Affected Repositories</div>
+                        </div>
+                    </div>
                 </div>
             </div>
+        </div>
 """
-            html += "        </div>"
 
         # Repository details
         if stats['repository_summary']:
